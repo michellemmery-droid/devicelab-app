@@ -50,6 +50,24 @@
     potential_integration_partner: "Potentiel integrationspartner",
     low_relevance: "Lav relevans"
   };
+  var businessNames = [
+    "Målerproducent",
+    "Smart Metering virksomhed",
+    "Meter Data Management virksomhed",
+    "IoT Platform",
+    "Utility Software",
+    "Gateway Producent",
+    "System Integrator",
+    "Kommunikationsleverandør",
+    "Energiselskab",
+    "Konsulenthus",
+    "Andet"
+  ];
+
+  function businessRole(row) {
+    var value = (row && row.industry) || "";
+    return businessNames.indexOf(value) >= 0 ? value : "";
+  }
 
   function blankForm() {
     return { result: "", name: "", title: "", email: "", phone: "", potential: "", follow: "", date: "", notes: "" };
@@ -636,7 +654,7 @@
     state.busy = !state.research;
     render();
     try {
-      state.research = await call("/rest/v1/companies?select=id,name,match_score,visit_value,customer_type,lead_hypothesis,profile_confidence,profile_updated_at,relationship_status&order=name.asc&limit=1000");
+      state.research = await call("/rest/v1/companies?select=id,name,match_score,visit_value,customer_type,lead_hypothesis,industry,biography,profile_confidence,profile_updated_at,relationship_status&order=name.asc&limit=1000");
       state.jobs = await call("/rest/v1/profile_jobs?select=id,company_id,status,error,created_at&order=created_at.desc&limit=30");
     } catch (err) {
       state.error = "Research Status kunne ikke hentes.";
@@ -714,10 +732,15 @@
 
   function reviewCard(row, searching) {
     var kind = typeLabels[row.customer_type] || "Ikke afklaret";
+    var role = businessRole(row);
+    var line = role
+      ? (row.biography || "Beskrivelsen mangler.")
+      : (row.profile_updated_at ? (row.lead_hypothesis || "Hypotesen mangler.") : "Profilen er ikke kørt endnu.");
     return el("article", { class: "review" }, [
       el("button", { class: "review-open", type: "button", onclick: function () { openProfile(row.id); } }, [
         el("b", null, [row.name]),
         el("span", { class: "badges" }, [
+          role ? el("span", { class: "pill outline" }, [role]) : null,
           el("span", { class: badgeClass(row.customer_type) }, [kind]),
           el("span", { class: "pill" }, [visitValues[row.visit_value] || "Besøgsværdi ikke sat"]),
           el("span", { class: "pill score" }, [String(row.match_score || 0)]),
@@ -725,7 +748,7 @@
             ? el("span", { class: "pill outline" }, [relations[row.relationship_status] || ""])
             : null
         ]),
-        el("span", { class: "hyp" }, [row.profile_updated_at ? (row.lead_hypothesis || "Hypotesen mangler.") : "Profilen er ikke kørt endnu."])
+        el("span", { class: "hyp" }, [line])
       ]),
       searching ? el("button", { class: "choice slim", type: "button", onclick: function () { rerun(row); } }, ["Kør igen"]) : null
     ]);
@@ -746,7 +769,7 @@
     state.profile = { id: companyId, name: "Henter…" };
     render();
     try {
-      var rows = await call("/rest/v1/companies?select=id,name,country,website,biography,about,match_score,match_reason,conversation_topics,qualification_questions,visit_value,customer_type,pain_points,lead_hypothesis,profile_confidence,profile_sources,profile_updated_at,relationship_status&id=eq." + encodeURIComponent(companyId));
+      var rows = await call("/rest/v1/companies?select=id,name,country,website,biography,about,industry,match_score,match_reason,conversation_topics,qualification_questions,visit_value,customer_type,pain_points,lead_hypothesis,profile_confidence,profile_sources,profile_updated_at,relationship_status&id=eq." + encodeURIComponent(companyId));
       if (state.profileToken !== companyId) return;
       state.profile = rows[0] || null;
       if (!state.profile) state.error = "Profilen blev ikke fundet.";
@@ -764,8 +787,10 @@
       el("p", { class: "eyebrow" }, [stand || "Research"]),
       el("button", { class: "link", type: "button", onclick: function () { state.page = "research"; render(); } }, ["Tilbage"])
     ]));
+    var role = businessRole(profile);
     root.appendChild(el("h1", { class: "voice" }, [profile.name || "Virksomhed"]));
     root.appendChild(el("div", { class: "badges" }, [
+      role ? el("span", { class: "pill outline" }, [role]) : null,
       el("span", { class: badgeClass(profile.customer_type) }, [typeLabels[profile.customer_type] || "Ikke afklaret"]),
       el("span", { class: "pill" }, [visitValues[profile.visit_value] || "Besøgsværdi ikke sat"]),
       el("span", { class: "pill score" }, ["Score " + (profile.match_score || 0)]),
@@ -774,6 +799,12 @@
     if (state.busy) {
       root.appendChild(el("p", { class: "hint" }, ["Henter profilen…"]));
       return;
+    }
+    if (role && profile.biography) {
+      root.appendChild(el("article", { class: "card qcard" }, [
+        el("p", { class: "kicker" }, ["Forretning"]),
+        el("p", { class: "ask serif" }, [profile.biography])
+      ]));
     }
     root.appendChild(el("section", { class: "card" }, [
       el("p", { class: "kicker" }, ["Relation"]),
@@ -804,8 +835,8 @@
         el("p", { class: "quiet" }, [reasons.join(" · ")])
       ]));
     }
-    if (profile.biography) root.appendChild(el("p", { class: "quiet" }, [profile.biography]));
-    if (profile.about) root.appendChild(el("p", { class: "quiet" }, [profile.about]));
+    if (!role && profile.biography) root.appendChild(el("p", { class: "quiet" }, [profile.biography]));
+    if (!role && profile.about) root.appendChild(el("p", { class: "quiet" }, [profile.about]));
     var site = (profile.website || "").trim();
     if (site) {
       var href = site.indexOf("http") === 0 ? site : "https://" + site;
