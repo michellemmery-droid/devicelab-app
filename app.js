@@ -531,7 +531,11 @@
       return el("button", {
         class: "choice" + (state.form[key] === id ? " on" : ""),
         type: "button",
-        onclick: function () { state.form[key] = id; render(); }
+        onclick: function () {
+          state.form[key] = id;
+          if (key === "result") state.error = "";
+          render();
+        }
       }, [options[id]]);
     }));
   }
