@@ -16,6 +16,7 @@
     jobs: [],
     profile: null,
     reviewQuery: "",
+    relation: "all",
     notice: "",
     error: "",
     busy: false,
@@ -34,6 +35,14 @@
     potential_customer: "Potentiel kunde",
     potential_partner: "Potentiel partner",
     potential_integration_partner: "Potentiel integrationspartner"
+  };
+  var relations = {
+    new: "Ny virksomhed",
+    existing_contact: "Eksisterende kontakt",
+    existing_customer: "Eksisterende kunde",
+    existing_partner: "Eksisterende partner",
+    later: "Kontakt igen senere",
+    not_needed: "Kontakt ikke nødvendig"
   };
   var typeLabels = {
     potential_customer: "Potentiel kunde",
@@ -627,7 +636,7 @@
     state.busy = !state.research;
     render();
     try {
-      state.research = await call("/rest/v1/companies?select=id,name,match_score,visit_value,customer_type,lead_hypothesis,profile_confidence,profile_updated_at&order=name.asc&limit=1000");
+      state.research = await call("/rest/v1/companies?select=id,name,match_score,visit_value,customer_type,lead_hypothesis,profile_confidence,profile_updated_at,relationship_status&order=name.asc&limit=1000");
       state.jobs = await call("/rest/v1/profile_jobs?select=id,company_id,status,error,created_at&order=created_at.desc&limit=30");
     } catch (err) {
       state.error = "Research Status kunne ikke hentes.";
@@ -655,6 +664,15 @@
     if (jobCount("error")) {
       root.appendChild(el("p", { class: "error" }, [jobCount("error") + " genkørsel fik en fejl. Søg virksomheden frem og kør den igen."]));
     }
+    root.appendChild(el("div", { class: "filters" }, [["all", "Alle"]].concat(Object.keys(relations).map(function (id) {
+      return [id, relations[id]];
+    })).map(function (item) {
+      return el("button", {
+        class: state.relation === item[0] ? "on" : "",
+        type: "button",
+        onclick: function () { state.relation = item[0]; render(); }
+      }, [item[1]]);
+    })));
     var search = el("input", { class: "field search", type: "search", placeholder: "Find en virksomhed", value: state.reviewQuery });
     search.addEventListener("input", function () { state.reviewQuery = search.value; paintReview(); });
     root.appendChild(search);
@@ -673,12 +691,23 @@
     if (!list) return;
     clear(list);
     var q = state.reviewQuery.trim().toLowerCase();
-    var rows = q.length >= 2
-      ? (state.research || []).filter(function (row) { return (row.name || "").toLowerCase().indexOf(q) !== -1; }).slice(0, 20)
-      : reviewSet(state.research || []);
+    var pool = (state.research || []).filter(function (row) {
+      var relation = row.relationship_status || "new";
+      var relationOk = state.relation === "all" || relation === state.relation;
+      var queryOk = q.length < 2 || (row.name || "").toLowerCase().indexOf(q) !== -1;
+      return relationOk && queryOk;
+    });
+    var rows = state.relation === "all" && q.length < 2 ? reviewSet(pool) : pool.slice(0, 40);
     if (!rows.length) {
-      list.appendChild(el("p", { class: "hint" }, [q ? "Ingen virksomhed med det navn." : "Der er ingen profiler endnu."]));
+      list.appendChild(el("p", { class: "hint" }, [
+        q ? "Ingen virksomhed med det navn." : "Ingen virksomheder med den relation."
+      ]));
       return;
+    }
+    if (state.relation !== "all" || q.length >= 2) {
+      list.appendChild(el("p", { class: "quiet" }, [
+        pool.length === 1 ? "1 virksomhed." : pool.length + " virksomheder."
+      ]));
     }
     rows.forEach(function (row) { list.appendChild(reviewCard(row, q.length >= 2)); });
   }
@@ -691,7 +720,10 @@
         el("span", { class: "badges" }, [
           el("span", { class: badgeClass(row.customer_type) }, [kind]),
           el("span", { class: "pill" }, [visitValues[row.visit_value] || "Besøgsværdi ikke sat"]),
-          el("span", { class: "pill score" }, [String(row.match_score || 0)])
+          el("span", { class: "pill score" }, [String(row.match_score || 0)]),
+          (row.relationship_status && row.relationship_status !== "new")
+            ? el("span", { class: "pill outline" }, [relations[row.relationship_status] || ""])
+            : null
         ]),
         el("span", { class: "hyp" }, [row.profile_updated_at ? (row.lead_hypothesis || "Hypotesen mangler.") : "Profilen er ikke kørt endnu."])
       ]),
@@ -714,7 +746,7 @@
     state.profile = { id: companyId, name: "Henter…" };
     render();
     try {
-      var rows = await call("/rest/v1/companies?select=id,name,country,website,biography,about,match_score,match_reason,conversation_topics,qualification_questions,visit_value,customer_type,pain_points,lead_hypothesis,profile_confidence,profile_sources,profile_updated_at&id=eq." + encodeURIComponent(companyId));
+      var rows = await call("/rest/v1/companies?select=id,name,country,website,biography,about,match_score,match_reason,conversation_topics,qualification_questions,visit_value,customer_type,pain_points,lead_hypothesis,profile_confidence,profile_sources,profile_updated_at,relationship_status&id=eq." + encodeURIComponent(companyId));
       if (state.profileToken !== companyId) return;
       state.profile = rows[0] || null;
       if (!state.profile) state.error = "Profilen blev ikke fundet.";
@@ -743,6 +775,16 @@
       root.appendChild(el("p", { class: "hint" }, ["Henter profilen…"]));
       return;
     }
+    root.appendChild(el("section", { class: "card" }, [
+      el("p", { class: "kicker" }, ["Relation"]),
+      el("div", { class: "relate" }, Object.keys(relations).map(function (id) {
+        return el("button", {
+          class: "choice" + ((profile.relationship_status || "new") === id ? " on" : ""),
+          type: "button",
+          onclick: function () { saveRelation(profile, id); }
+        }, [relations[id]]);
+      }))
+    ]));
     root.appendChild(el("article", { class: "card qcard" }, [
       el("p", { class: "kicker" }, ["Lead Hypothesis"]),
       el("p", { class: "ask serif" }, [profile.lead_hypothesis || "Der er ikke skrevet en hypotese endnu."])
@@ -794,6 +836,28 @@
       return item.id === companyId || item.company_id === companyId;
     });
     return row ? standLabel(row) : "";
+  }
+
+  async function saveRelation(profile, status) {
+    if (!profile || !profile.id || profile.relationship_status === status) return;
+    var previous = profile.relationship_status || "new";
+    profile.relationship_status = status;
+    state.error = "";
+    render();
+    try {
+      await call("/rest/v1/companies?id=eq." + encodeURIComponent(profile.id), {
+        method: "PATCH",
+        prefer: "return=minimal",
+        body: { relationship_status: status }
+      });
+      (state.research || []).forEach(function (row) {
+        if (row.id === profile.id) row.relationship_status = status;
+      });
+    } catch (err) {
+      profile.relationship_status = previous;
+      state.error = "Relationen kunne ikke gemmes.";
+      render();
+    }
   }
 
   async function rerun(row) {

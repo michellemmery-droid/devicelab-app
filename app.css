@@ -88,6 +88,18 @@ h2 { font-size: 2rem; line-height: 1.05; }
 .choice.slim { min-height: 48px; margin-top: 12px; }
 .choice.on { background: var(--ink); color: #f7f3ec; }
 .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+.relate { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+.filters { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+.filters button {
+  min-height: 44px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: transparent;
+  font-size: 14px;
+  font-weight: 650;
+}
+.filters button.on { background: var(--ink); color: #fbf6ee; border-color: var(--ink); }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 
 .field, .area {
