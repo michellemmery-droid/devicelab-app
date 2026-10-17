@@ -355,8 +355,8 @@
         values[profile.visit_value] ? el("span", { class: "pill" }, [values[profile.visit_value]]) : null,
         profile.profile_confidence === "thin" ? el("span", { class: "pill" }, ["Tyndt grundlag"]) : null
       ]),
-      block("Lead Hypothesis", profile.lead_hypothesis),
       block("Forventet kundetype", customers[profile.customer_type] || ""),
+      block("Lead Hypothesis", profile.lead_hypothesis),
       bullets("Hvorfor", profile.match_reason),
       bullets("Forventede smertepunkter", profile.pain_points),
       bullets("Forventede samtaleemner", profile.conversation_topics),
