@@ -20,16 +20,32 @@
     notice: "",
     error: "",
     busy: false,
-    saved: ""
+    saved: "",
+    savedName: "",
+    returnTo: "research"
   };
 
-  var results = {
-    not_relevant: "Ikke relevant",
+  var outcomes = {
+    not_interesting: "Ikke interessant",
+    maybe: "Måske interessant",
     interesting: "Interessant",
-    ready: "Klar til ledelsen",
-    meeting: "Møde arrangeret"
+    hot: "Hot Lead"
   };
-  var potentials = { low: "Lav", medium: "Mellem", high: "Høj" };
+  var actions = {
+    none: "Ingen",
+    email: "Send mail",
+    call: "Ring",
+    demo: "Book demo",
+    partner: "Partnerdialog",
+    again: "Besøg igen"
+  };
+  var levels = {
+    no_interest: "Ingen interesse",
+    interested: "Interesseret",
+    contact: "Vil kontaktes",
+    demo: "Ønsker demo",
+    very: "Meget interesseret"
+  };
   var visitValues = { high: "Høj besøgsværdi", medium: "Mellem besøgsværdi", low: "Lav besøgsværdi" };
   var types = {
     potential_customer: "Potentiel kunde",
@@ -70,7 +86,17 @@
   }
 
   function blankForm() {
-    return { result: "", name: "", title: "", email: "", phone: "", potential: "", follow: "", date: "", notes: "" };
+    return {
+      result: "",
+      action: "none",
+      level: "",
+      notes: "",
+      contactOpen: false,
+      name: "",
+      title: "",
+      email: "",
+      phone: ""
+    };
   }
 
   function el(tag, attrs, children) {
@@ -231,6 +257,19 @@
     return reasons;
   }
 
+  function profileLine(row) {
+    var profile = row.profile || {};
+    var industry = profile.industry || "";
+    var bio = profile.biography || "";
+    if (businessNames.indexOf(industry) >= 0) {
+      var money = bio.match(/De tjener penge på [^.]+\./);
+      return money ? industry + ". " + money[0] : industry + ".";
+    }
+    var sentence = bio.split(". ")[0];
+    if (sentence) return sentence.length > 110 ? sentence.slice(0, 107) + "…" : sentence;
+    return why(row).slice(0, 2).join(" · ");
+  }
+
   function questions(row) {
     return asList(row.profile.qualification_questions).slice(0, 3);
   }
@@ -248,7 +287,8 @@
 
   function render() {
     clear(root);
-    root.className = "phone" + (state.page === "mission" || state.page === "capture" || state.page === "profile" ? " bare" : "");
+    var bare = state.page === "mission" || state.page === "capture" || state.page === "profile";
+    root.className = "phone" + (bare ? " bare" : "") + (state.page === "capture" ? " capture" : "");
     if (!state.session) return renderLogin();
     if (state.busy && !state.rows.length) {
       root.appendChild(el("p", { class: "hint" }, ["Henter dagen…"]));
@@ -316,7 +356,7 @@
 
   async function loadRows() {
     var query = "/rest/v1/exhibitors?select=id,company_id,name,hall,stand_number,relevance,visit_plan,next_step,summary,sales_opportunity,visited_at,"
-      + "companies(match_score,match_reason,conversation_topics,qualification_questions,customer_type,profile_updated_at)"
+      + "companies(match_score,match_reason,conversation_topics,qualification_questions,customer_type,industry,biography,profile_updated_at)"
       + "&event_id=eq." + encodeURIComponent(state.eventId)
       + "&limit=1000";
     state.rows = (await call(query)).map(attach);
@@ -331,10 +371,12 @@
       el("p", { class: "eyebrow" }, [state.here ? "Du er ved " + state.here.name : "Du er ikke startet"])
     ]));
     root.appendChild(el("h1", null, [greeting() + ", Michell."]));
-    var achieved = todayCount("ready") + todayCount("meeting");
-    if (achieved) {
+    var hot = todayCount("hot");
+    var marked = todayCount("interesting");
+    var maybe = todayCount("maybe");
+    if (hot || marked || maybe) {
       root.appendChild(el("p", { class: "quiet" }, [
-        "I dag er " + todayCount("interesting") + " interessante, " + todayCount("ready") + " sendt videre og " + todayCount("meeting") + " møder sat."
+        "I dag er " + hot + " hot leads, " + marked + " interessante og " + maybe + " måske."
       ]));
     }
     root.appendChild(el("p", { class: "lead" }, [
@@ -387,22 +429,16 @@
       return;
     }
     root.appendChild(el("div", { class: "top" }, [
-      el("p", { class: "eyebrow" }, [(state.index + 1) + " af " + state.mission.length + " · " + hallLabel(row.hall)]),
+      el("p", { class: "eyebrow" }, [standLabel(row)]),
       el("button", { class: "link", type: "button", onclick: function () { state.page = "home"; render(); } }, ["Luk"])
     ]));
     root.appendChild(el("h1", null, [row.name]));
-    root.appendChild(el("p", { class: "meta" }, [standLabel(row) + " · Score " + row.match_score]));
-    root.appendChild(el("section", { class: "card" }, [
-      el("p", { class: "kicker" }, ["Hvorfor"]),
-      el("p", { class: "why" }, [why(row).join(" · ") || "Profilen er tynd."])
-    ]));
+    if (state.savedName) root.appendChild(el("p", { class: "done" }, [state.savedName + " er gemt."]));
+    var line = profileLine(row);
+    if (line) root.appendChild(el("p", { class: "ai" }, [line]));
     var asks = questions(row);
-    if (asks.length) {
-      root.appendChild(el("section", { class: "card" }, [
-        el("p", { class: "kicker" }, ["Spørg"])
-      ].concat(asks.map(function (item) { return el("p", { class: "ask" }, [item]); }))));
-    }
-    root.appendChild(el("button", { class: "action", type: "button", onclick: function () { openCapture(row); } }, ["Besøgt"]));
+    if (asks.length) root.appendChild(el("p", { class: "ask" }, [asks[0]]));
+    root.appendChild(el("button", { class: "action", type: "button", onclick: function () { openCapture(row); } }, ["Registrer besøg"]));
     root.appendChild(el("div", { class: "pair" }, [
       el("button", { class: "choice", type: "button", onclick: function () { mark(row, "return_later"); } }, ["Senere"]),
       el("button", { class: "choice", type: "button", onclick: function () { mark(row, "skip"); } }, ["Spring over"])
@@ -416,6 +452,7 @@
     state.page = "capture";
     state.error = "";
     state.saved = "";
+    state.savedName = "";
     render();
   }
 
@@ -447,41 +484,66 @@
     var row = state.captureFor;
     var form = state.form;
     root.appendChild(el("div", { class: "top" }, [
+      el("p", { class: "eyebrow" }, [standLabel(row)]),
       el("button", { class: "link", type: "button", onclick: function () { state.page = "mission"; render(); } }, ["Tilbage"])
     ]));
-    root.appendChild(el("p", { class: "eyebrow" }, [row.name]));
-    root.appendChild(el("h1", null, ["Hvad kom der ud af det?"]));
-    root.appendChild(el("div", { class: "grid2" }, Object.keys(results).map(function (id) {
-      return el("button", {
-        class: "choice" + (form.result === id ? " on" : ""),
+    root.appendChild(el("h1", null, [row.name]));
+    root.appendChild(el("p", { class: "ai" }, [
+      profileLine(row),
+      el("button", {
+        class: "link",
         type: "button",
-        onclick: function () { form.result = id; render(); }
-      }, [results[id]]);
-    })));
-    root.appendChild(field("Kontaktperson", "name", "text"));
-    root.appendChild(field("Titel", "title", "text"));
-    root.appendChild(field("Telefon", "phone", "tel"));
-    root.appendChild(field("E-mail", "email", "email"));
-    root.appendChild(el("div", { class: "pair" }, Object.keys(potentials).map(function (id) {
-      return el("button", {
-        class: "choice" + (form.potential === id ? " on" : ""),
-        type: "button",
-        onclick: function () { form.potential = id; render(); }
-      }, ["Potentiale " + potentials[id]]);
-    })));
-    root.appendChild(field("Aftalt opfølgning", "follow", "text"));
-    root.appendChild(el("p", { class: "kicker", style: "margin-top:18px" }, ["Opfølgningsdato"]));
-    root.appendChild(field("Dato", "date", "date"));
-    var notes = el("textarea", { class: "area", placeholder: "Noter" });
+        onclick: function () { openProfile(row.company_id || row.id, "capture"); }
+      }, ["Se profilen"])
+    ]));
+    root.appendChild(el("p", { class: "kicker" }, ["Messebesøg"]));
+    root.appendChild(chipGrid(outcomes, "result"));
+    root.appendChild(el("p", { class: "kicker" }, ["Næste handling"]));
+    root.appendChild(chipRow(actions, "action"));
+    root.appendChild(el("p", { class: "kicker" }, ["Kontaktniveau"]));
+    root.appendChild(chipRow(levels, "level"));
+    root.appendChild(el("p", { class: "kicker" }, ["Mine noter"]));
+    var notes = el("textarea", { class: "area", placeholder: "Skriv det, du hørte." });
     notes.value = form.notes;
     notes.addEventListener("input", function () { form.notes = notes.value; });
     root.appendChild(notes);
-    if (window.SpeechRecognition || window.webkitSpeechRecognition) {
-      root.appendChild(el("button", { class: "choice", type: "button", onclick: dictate }, ["Tal noten"]));
+    root.appendChild(el("p", { class: "kicker" }, ["Kontaktperson"]));
+    if (!form.contactOpen) {
+      root.appendChild(el("button", {
+        class: "choice",
+        type: "button",
+        onclick: function () { form.contactOpen = true; render(); }
+      }, ["Tilføj kontakt"]));
+    } else {
+      root.appendChild(field("Navn", "name", "text"));
+      root.appendChild(field("Titel", "title", "text"));
+      root.appendChild(field("Email", "email", "email"));
+      root.appendChild(field("Telefon", "phone", "tel"));
     }
     if (state.error) root.appendChild(el("p", { class: "error" }, [state.error]));
-    if (state.saved) root.appendChild(el("p", { class: "quiet" }, [state.saved]));
-    root.appendChild(el("button", { class: "action", type: "button", onclick: saveCapture }, [state.busy ? "Gemmer…" : "Gem samtalen"]));
+    root.appendChild(el("div", { class: "dock" }, [
+      el("button", { class: "action", type: "button", onclick: saveCapture }, [state.busy ? "Gemmer…" : "Gem og gå videre"])
+    ]));
+  }
+
+  function chipGrid(options, key) {
+    return el("div", { class: "grid2" }, Object.keys(options).map(function (id) {
+      return el("button", {
+        class: "choice" + (state.form[key] === id ? " on" : ""),
+        type: "button",
+        onclick: function () { state.form[key] = id; render(); }
+      }, [options[id]]);
+    }));
+  }
+
+  function chipRow(options, key) {
+    return el("div", { class: "chips" }, Object.keys(options).map(function (id) {
+      return el("button", {
+        class: state.form[key] === id ? "on" : "",
+        type: "button",
+        onclick: function () { state.form[key] = state.form[key] === id && key === "level" ? "" : id; render(); }
+      }, [options[id]]);
+    }));
   }
 
   function field(label, key, type) {
@@ -506,7 +568,7 @@
     var row = state.captureFor;
     var form = state.form;
     if (!form.result) {
-      state.error = "Vælg hvad samtalen blev til.";
+      state.error = "Vælg et udfald.";
       render();
       return;
     }
@@ -514,19 +576,18 @@
     state.error = "";
     render();
     var when = new Date().toISOString();
-    var follow = form.follow.trim();
-    if (form.date) follow = (follow ? follow + " · " : "") + form.date;
+    var action = form.action && form.action !== "none" ? actions[form.action] : "";
     try {
       if (!form.exhibitorSaved) {
         await call("/rest/v1/exhibitors?id=eq." + encodeURIComponent(row.id), {
           method: "PATCH",
           prefer: "return=minimal",
           body: {
-            visit_plan: "visited",
+            visit_plan: form.action === "again" ? "return_later" : "visited",
             relevance: form.result,
-            next_step: follow,
+            next_step: action,
             summary: form.notes.trim(),
-            sales_opportunity: form.potential || "low",
+            sales_opportunity: form.level || "",
             visited_at: when,
             updated_at: when
           }
@@ -558,19 +619,21 @@
         });
         form.noteSaved = true;
       }
-      if (follow && !form.followSaved) {
+      if (action && !form.followSaved) {
         await call("/rest/v1/followups", {
           method: "POST",
           prefer: "return=minimal",
-          body: { id: crypto.randomUUID(), company_id: row.id, title: follow, source: "fair", created_at: when }
+          body: { id: crypto.randomUUID(), company_id: row.id, title: action, source: "fair", created_at: when }
         });
         form.followSaved = true;
       }
-      row.visit_plan = "visited";
+      row.visit_plan = form.action === "again" ? "return_later" : "visited";
       row.relevance = form.result;
-      row.next_step = follow;
+      row.next_step = action;
       row.summary = form.notes.trim();
+      row.sales_opportunity = form.level || "";
       saveHere(row);
+      state.savedName = shortCompany(row.name);
       state.busy = false;
       advance();
     } catch (err) {
@@ -760,7 +823,12 @@
     return "pill outline";
   }
 
-  async function openProfile(companyId) {
+  function shortCompany(name) {
+    return String(name || "").replace(/\s+(GmbH(?:\s*&\s*Co\.?)?|AG|SE|KG|Corp\.?|Inc\.?|A\/S|ApS)\.?$/i, "").trim();
+  }
+
+  async function openProfile(companyId, back) {
+    state.returnTo = back || "research";
     state.page = "profile";
     state.error = "";
     state.notice = "";
@@ -785,7 +853,7 @@
     var stand = standFor(profile.id);
     root.appendChild(el("div", { class: "top" }, [
       el("p", { class: "eyebrow" }, [stand || "Research"]),
-      el("button", { class: "link", type: "button", onclick: function () { state.page = "research"; render(); } }, ["Tilbage"])
+      el("button", { class: "link", type: "button", onclick: function () { state.page = state.returnTo || "research"; render(); } }, ["Tilbage"])
     ]));
     var role = businessRole(profile);
     root.appendChild(el("h1", { class: "voice" }, [profile.name || "Virksomhed"]));

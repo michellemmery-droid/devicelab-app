@@ -209,3 +209,36 @@ a { color: var(--ink); }
 
 .error { color: #9a3412; margin: 12px 0 0; }
 .hint { color: var(--muted); margin-top: 18px; }
+
+.ai { margin: 12px 0 0; color: var(--muted); font-size: 1.02rem; line-height: 1.35; }
+.ai .link { display: block; margin-top: 2px; min-height: 32px; text-align: left; }
+.done {
+  margin: 14px 0 0;
+  padding: 12px 16px;
+  border-radius: 16px;
+  background: #e6efe0;
+  color: var(--green);
+  font-weight: 650;
+}
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chips button {
+  min-height: 48px;
+  padding: 8px 16px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: transparent;
+  font-size: 1rem;
+  font-weight: 640;
+}
+.chips button.on { background: var(--ink); color: #fbf6ee; border-color: var(--ink); }
+.phone.capture { padding-bottom: calc(112px + env(safe-area-inset-bottom)); }
+.dock {
+  position: fixed;
+  left: 50%;
+  bottom: 0;
+  transform: translateX(-50%);
+  width: min(480px, 100%);
+  padding: 10px 22px calc(14px + env(safe-area-inset-bottom));
+  background: var(--bg);
+}
+.dock .action { margin-top: 0; }
