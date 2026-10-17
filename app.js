@@ -7,9 +7,27 @@
     eventId: "",
     rows: [],
     query: "",
+    plan: "",
     company: null,
+    page: "list",
     error: "",
-    busy: false
+    busy: false,
+    research: null,
+    rerun: ""
+  };
+
+  var plans = {
+    must_visit: "Skal besøges",
+    visited: "Besøgt",
+    return_later: "Kom tilbage senere",
+    skip: "Spring over"
+  };
+  var values = { high: "Høj", medium: "Mellem", low: "Lav" };
+  var customers = {
+    potential_customer: "Potentiel kunde",
+    potential_partner: "Potentiel partner",
+    potential_integration_partner: "Potentiel integrationspartner",
+    low_relevance: "Lav relevans"
   };
 
   var relevance = {
@@ -117,10 +135,25 @@
     return bits.join(" · ");
   }
 
+  function attachProfile(row) {
+    var profile = row.companies || {};
+    row.profile = profile;
+    row.match_score = profile.match_score || 0;
+    row.visit_value = profile.visit_value || "";
+    row.website = row.website || profile.website || "";
+    row.visit_plan = row.visit_plan || "unset";
+    return row;
+  }
+
+  function asList(value) {
+    return Array.isArray(value) ? value.filter(Boolean) : [];
+  }
+
   function filtered() {
     var q = state.query.trim().toLowerCase();
-    if (!q) return state.rows;
     return state.rows.filter(function (row) {
+      if (state.plan && row.visit_plan !== state.plan) return false;
+      if (!q) return true;
       return (row.name || "").toLowerCase().indexOf(q) !== -1
         || (row.country || "").toLowerCase().indexOf(q) !== -1
         || (row.stand_number || "").toLowerCase().indexOf(q) !== -1;
@@ -134,6 +167,7 @@
       return;
     }
     if (!state.session) renderLogin();
+    else if (state.page === "research") renderResearch();
     else if (state.company) renderCompany();
     else renderList();
   }
@@ -198,10 +232,14 @@
   async function loadRows() {
     state.busy = true;
     render();
-    var query = "/rest/v1/exhibitors?select=id,name,hall,stand_number,country,website,relevance,lead_score,next_step,company_id,event_id"
+    var query = "/rest/v1/exhibitors?select=id,name,hall,stand_number,country,website,relevance,visit_plan,company_id,event_id,"
+      + "companies(website,biography,about,industry,products,technologies,integrations,customers,match_score,match_reason,conversation_topics,qualification_questions,visit_value,customer_type,pain_points,lead_hypothesis,profile_confidence,profile_updated_at)"
       + "&event_id=eq." + encodeURIComponent(state.eventId)
-      + "&order=name.asc&limit=1000";
-    state.rows = await call(query);
+      + "&limit=1000";
+    state.rows = (await call(query)).map(attachProfile);
+    state.rows.sort(function (a, b) {
+      return (b.match_score || 0) - (a.match_score || 0) || a.name.localeCompare(b.name, "da");
+    });
     state.busy = false;
     render();
   }
@@ -216,8 +254,9 @@
       el("div", { class: "row" }, [
         el("div", { class: "grow" }, [
           el("h1", { class: "brand" }, ["DeviceLab"]),
-          el("p", { class: "sub" }, ["Virksomheder på messen"])
+          el("p", { class: "sub" }, ["Sorteret efter Match Score"])
         ]),
+        el("button", { class: "btn ghost", type: "button", onclick: openResearch }, ["Research"]),
         el("button", { class: "btn ghost", type: "button", onclick: signOut }, ["Log ud"])
       ])
     ]));
@@ -231,6 +270,15 @@
       })));
     }
     root.appendChild(search);
+    root.appendChild(el("div", { class: "wrap", style: "margin:12px 0" }, [{ id: "", label: "Alle" }].concat(Object.keys(plans).map(function (id) {
+      return { id: id, label: plans[id] };
+    })).map(function (item) {
+      return el("button", {
+        class: "chip" + (state.plan === item.id ? " on" : ""),
+        type: "button",
+        onclick: function () { state.plan = item.id; render(); }
+      }, [item.label]);
+    })));
     root.appendChild(el("div", { class: "row", style: "margin:12px 0" }, [
       el("button", { class: "btn", type: "button", onclick: function () { exportFile("csv"); } }, ["CSV"]),
       el("button", { class: "btn", type: "button", onclick: function () { exportFile("xlsx"); } }, ["Excel"])
@@ -261,9 +309,9 @@
         el("span", { class: "company-body" }, [
           el("span", { class: "company-top" }, [
             el("span", { class: "name" }, [row.name || "Ukendt"]),
-            el("span", { class: "pill " + tone(row.relevance) }, [label(row.relevance)])
+            el("span", { class: "pill tone-relevant" }, [String(row.match_score || 0)])
           ]),
-          el("span", { class: "place" }, [place(row) || "Stand er ikke udfyldt"])
+          el("span", { class: "place" }, [cardLine(row)])
         ])
       ]));
     });
@@ -282,29 +330,169 @@
     }
   }
 
+  function cardLine(row) {
+    var bits = [];
+    if (values[row.visit_value]) bits.push(values[row.visit_value]);
+    if (place(row)) bits.push(place(row));
+    var reason = asList(row.profile && row.profile.match_reason)[0];
+    if (reason) bits.push(reason);
+    if (plans[row.visit_plan]) bits.push(plans[row.visit_plan]);
+    return bits.join(" · ") || "Profilen er ikke klar endnu";
+  }
+
   function renderCompany() {
     var row = state.company;
+    var profile = row.profile || {};
     var site = (row.website || "").trim();
     var href = site && site.indexOf("http") !== 0 ? "https://" + site : site;
     root.appendChild(el("header", { id: "top" }, [
       el("button", { class: "back", type: "button", onclick: function () { state.company = null; render(); } }, ["← Virksomheder"])
     ]));
-    root.appendChild(el("article", { class: "card" }, [
+    root.appendChild(el("article", { class: "card stack" }, [
       el("h1", { class: "name" }, [row.name || "Ukendt"]),
-      el("div", { class: "gap" }),
-      el("span", { class: "pill " + tone(row.relevance) }, [label(row.relevance)]),
-      el("div", { class: "gap" }),
+      el("div", { class: "wrap" }, [
+        el("span", { class: "pill tone-relevant" }, ["Score " + (profile.match_score || 0)]),
+        values[profile.visit_value] ? el("span", { class: "pill" }, [values[profile.visit_value]]) : null,
+        profile.profile_confidence === "thin" ? el("span", { class: "pill" }, ["Tyndt grundlag"]) : null
+      ]),
+      block("Lead Hypothesis", profile.lead_hypothesis),
+      block("Forventet kundetype", customers[profile.customer_type] || ""),
+      bullets("Hvorfor", profile.match_reason),
+      bullets("Forventede smertepunkter", profile.pain_points),
+      bullets("Forventede samtaleemner", profile.conversation_topics),
+      bullets("Kvalificerende spørgsmål", profile.qualification_questions),
+      block("Biografi", profile.biography),
+      bullets("Produkter", profile.products),
+      bullets("Teknologier", profile.technologies),
+      block("Hvad de arbejder med", profile.about),
+      block("Branche", profile.industry),
+      bullets("Integrationer", profile.integrations),
+      bullets("Kunder", profile.customers),
       fact("Hal", row.hall || "—"),
       fact("Stand", row.stand_number || "—"),
       fact("Land", row.country || "—"),
       el("p", { class: "fact" }, [
         el("b", null, ["Hjemmeside"]),
-        href
-          ? el("a", { href: href, target: "_blank", rel: "noopener" }, [site])
-          : document.createTextNode("—")
+        href ? el("a", { href: href, target: "_blank", rel: "noopener" }, [site]) : document.createTextNode("—")
       ]),
-      el("p", { class: "hint" }, ["Noter, billeder og stemme er ikke med i denne version."])
+      el("p", { class: "fact" }, [el("b", null, ["Besøgsplan"])]),
+      el("div", { class: "wrap" }, Object.keys(plans).map(function (id) {
+        return el("button", {
+          class: "chip" + (row.visit_plan === id ? " on" : ""),
+          type: "button",
+          onclick: function () { savePlan(row, id); }
+        }, [plans[id]]);
+      })),
+      state.error ? el("p", { class: "error" }, [state.error]) : null
     ]));
+  }
+
+  function block(title, value) {
+    if (!value) return null;
+    return el("p", { class: "fact" }, [el("b", null, [title]), value]);
+  }
+
+  function bullets(title, value) {
+    var items = asList(value);
+    if (!items.length) return null;
+    return el("div", { class: "fact" }, [
+      el("b", null, [title]),
+      el("ul", { class: "points" }, items.map(function (item) { return el("li", null, [item]); }))
+    ]);
+  }
+
+  async function savePlan(row, plan) {
+    state.error = "";
+    try {
+      await call("/rest/v1/exhibitors?id=eq." + encodeURIComponent(row.id), {
+        method: "PATCH",
+        body: { visit_plan: plan }
+      });
+      row.visit_plan = plan;
+      render();
+    } catch (err) {
+      state.error = "Besøgsplanen kunne ikke gemmes.";
+      render();
+    }
+  }
+
+  async function openResearch() {
+    state.page = "research";
+    state.company = null;
+    state.error = "";
+    state.busy = true;
+    render();
+    try {
+      state.research = await call("/rest/v1/companies?select=id,name,website,match_score,profile_updated_at&order=name.asc&limit=1000");
+    } catch (err) {
+      state.error = "Status kunne ikke hentes.";
+    }
+    state.busy = false;
+    render();
+  }
+
+  function renderResearch() {
+    var rows = state.research || [];
+    var profiled = rows.filter(function (row) { return row.profile_updated_at; });
+    var counts = {
+      "Profileret": profiled.length,
+      "Mangler profil": rows.length - profiled.length,
+      "Med hjemmeside": rows.filter(function (row) { return (row.website || "").trim(); }).length,
+      "Uden hjemmeside": rows.filter(function (row) { return !(row.website || "").trim(); }).length,
+      "Score over 70": profiled.filter(function (row) { return row.match_score > 70; }).length,
+      "Score 40-70": profiled.filter(function (row) { return row.match_score >= 40 && row.match_score <= 70; }).length,
+      "Score under 40": profiled.filter(function (row) { return row.match_score < 40; }).length
+    };
+    root.appendChild(el("header", { id: "top" }, [
+      el("button", { class: "back", type: "button", onclick: function () { state.page = "list"; render(); } }, ["← Virksomheder"]),
+      el("h1", { class: "brand" }, ["Research Status"])
+    ]));
+    if (state.busy) {
+      root.appendChild(el("p", { class: "hint" }, ["Henter status…"]));
+      return;
+    }
+    root.appendChild(el("div", { class: "stack" }, Object.keys(counts).map(function (name) {
+      return el("p", { class: "card stat" }, [el("b", null, [String(counts[name])]), name]);
+    })));
+    var search = el("input", { class: "search", type: "search", placeholder: "Find virksomhed og kør profilen igen", value: state.rerun });
+    search.addEventListener("input", function () { state.rerun = search.value; paintRerun(); });
+    root.appendChild(el("div", { class: "gap" }));
+    root.appendChild(search);
+    if (state.error) root.appendChild(el("p", { class: "error" }, [state.error]));
+    var list = el("div", { id: "rerun" });
+    root.appendChild(list);
+    paintRerun();
+  }
+
+  function paintRerun() {
+    var list = document.getElementById("rerun");
+    if (!list) return;
+    clear(list);
+    var q = state.rerun.trim().toLowerCase();
+    if (q.length < 2) return;
+    (state.research || []).filter(function (row) {
+      return (row.name || "").toLowerCase().indexOf(q) !== -1;
+    }).slice(0, 8).forEach(function (row) {
+      list.appendChild(el("div", { class: "card company-body" }, [
+        el("div", { class: "name" }, [row.name]),
+        el("p", { class: "place" }, ["Score " + (row.match_score || 0)]),
+        el("button", { class: "btn", type: "button", onclick: function () { rerun(row); } }, ["Kør igen"])
+      ]));
+    });
+  }
+
+  async function rerun(row) {
+    state.error = "";
+    try {
+      await call("/rest/v1/profile_jobs", { method: "POST", body: { company_id: row.id, status: "pending" } });
+      state.error = "";
+      row._queued = true;
+      var list = document.getElementById("rerun");
+      if (list) list.appendChild(el("p", { class: "hint" }, [row.name + " står i kø og køres igen."]));
+    } catch (err) {
+      state.error = "Genkørslen kunne ikke startes.";
+      render();
+    }
   }
 
   function fact(title, value) {
@@ -315,6 +503,7 @@
     saveSession(null);
     state.rows = [];
     state.company = null;
+    state.page = "list";
     state.error = "";
     render();
   }
