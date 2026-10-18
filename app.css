@@ -144,6 +144,7 @@ h2 { font-size: 2rem; line-height: 1.05; }
   font-size: 1.12rem;
   font-weight: 650;
 }
+.action[disabled] { opacity: 0.45; }
 .action.ghost, .choice {
   background: var(--card);
   color: var(--ink);

@@ -42,6 +42,11 @@
     saving: false,
     runs: [],
     followups: [],
+    contacts: [],
+    notes: [],
+    memoryLoaded: false,
+    afterQuery: "",
+    afterColdOpen: false,
     afterError: "",
     afterNotice: ""
   };
@@ -128,8 +133,134 @@
       name: "",
       title: "",
       email: "",
-      phone: ""
+      phone: "",
+      ready: false,
+      dirty: false,
+      touched: {},
+      snapshot: {}
     };
+  }
+
+  function actionCode(label) {
+    var keys = Object.keys(actions);
+    for (var i = 0; i < keys.length; i += 1) {
+      if (actions[keys[i]] === label) return keys[i];
+    }
+    return "none";
+  }
+
+  function byNewest(a, b) {
+    return (a.created_at || "") < (b.created_at || "") ? 1 : -1;
+  }
+
+  function knownContacts(companyId) {
+    var byId = {};
+    (state.contacts || []).forEach(function (item) {
+      if (item.company_id === companyId) byId[item.id] = item;
+    });
+    mine(companyId).forEach(function (op) {
+      if (op.kind === "contact" && !op.cancel) byId[op.id] = op.body;
+    });
+    return Object.keys(byId).map(function (id) { return byId[id]; }).sort(byNewest);
+  }
+
+  function latestContact(companyId) {
+    return knownContacts(companyId)[0] || null;
+  }
+
+  function knownNotes(companyId) {
+    var byId = {};
+    (state.notes || []).forEach(function (item) {
+      if (item.company_id === companyId) byId[item.id] = item;
+    });
+    mine(companyId).forEach(function (op) {
+      if (op.kind === "note" && !op.cancel) byId[op.id] = op.body;
+    });
+    return Object.keys(byId).map(function (id) { return byId[id]; }).sort(byNewest);
+  }
+
+  function visibleNote(row) {
+    if (!row) return "";
+    if ((row.summary || "").trim()) return row.summary.trim();
+    var note = knownNotes(row.id)[0];
+    return note && note.body ? note.body.trim() : "";
+  }
+
+  function allFollowups() {
+    var byId = {};
+    (state.followups || []).forEach(function (item) { byId[item.id] = item; });
+    mine().forEach(function (op) {
+      if (op.kind !== "followup" || op.cancel) return;
+      byId[op.id] = {
+        id: op.id,
+        company_id: op.companyId,
+        title: op.body.title,
+        done: false,
+        created_at: op.body.created_at || op.createdAt
+      };
+    });
+    return Object.keys(byId).map(function (id) { return byId[id]; });
+  }
+
+  function hasOpenFollowup(companyId, title) {
+    return allFollowups().some(function (item) {
+      return item.company_id === companyId && !item.done && item.title === title;
+    });
+  }
+
+  function formFrom(row) {
+    var contact = latestContact(row.id);
+    var note = visibleNote(row);
+    var action = actionCode(row.next_step || "");
+    var level = levels[row.sales_opportunity] ? row.sales_opportunity : "";
+    var result = outcomes[row.relevance] ? row.relevance : "";
+    var name = contact && contact.name ? contact.name : "";
+    var title = contact && contact.title ? contact.title : "";
+    var email = contact && contact.email ? contact.email : "";
+    var phone = contact && contact.phone ? contact.phone : "";
+    return {
+      result: result,
+      action: action,
+      level: level,
+      notes: note,
+      contactOpen: !!(name || title || email || phone),
+      name: name,
+      title: title,
+      email: email,
+      phone: phone,
+      ready: !!state.memoryLoaded,
+      dirty: false,
+      touched: {},
+      snapshot: {
+        result: result,
+        action: action,
+        level: level,
+        notes: note,
+        name: name,
+        title: title,
+        email: email,
+        phone: phone,
+        contactId: contact ? contact.id : ""
+      }
+    };
+  }
+
+  function fillForm(row) {
+    state.form = formFrom(row);
+  }
+
+  function adoptSnapshot(row) {
+    var fresh = formFrom(row);
+    var form = state.form || blankForm();
+    ["result", "action", "level", "notes", "name", "title", "email", "phone"].forEach(function (key) {
+      if (!form.touched[key]) form[key] = fresh[key];
+    });
+    if (!form.touched.name && !form.touched.title && !form.touched.email && !form.touched.phone) {
+      form.contactOpen = fresh.contactOpen;
+    }
+    form.snapshot = fresh.snapshot;
+    form.ready = true;
+    state.form = form;
   }
 
   function el(tag, attrs, children) {
@@ -375,7 +506,14 @@
     var id = userId();
     if (!id || !state.rows.length) return;
     try {
-      await idbPut("fair", { eventId: state.eventId, rows: state.rows }, id);
+      await idbPut("fair", {
+        eventId: state.eventId,
+        rows: state.rows,
+        contacts: state.contacts || [],
+        notes: state.notes || [],
+        followups: state.followups || [],
+        memory: !!state.memoryLoaded
+      }, id);
     } catch (err) { /* dagen kan stadig ligge i hukommelsen */ }
   }
 
@@ -387,13 +525,13 @@
     if (state.syncAuth && items.length) return { text: "Log ind for at sende det, der venter.", error: true, action: "login" };
     if (failed.length && waiting.length) {
       return {
-        text: failed.length + " kunne ikke sendes. " + waiting.length + " afventer synkronisering.",
+        text: failed.length + " kunne ikke sendes. " + waiting.length + " afventer synkronisering. Dataene ligger på telefonen.",
         error: true,
         action: "sync"
       };
     }
     if (failed.length) return { text: failed.length + " kunne ikke sendes. Dataene ligger på telefonen.", error: true, action: "sync" };
-    if (waiting.length) return { text: waiting.length + " afventer synkronisering", error: false, action: "sync" };
+    if (waiting.length) return { text: waiting.length + " afventer synkronisering. Dataene ligger på telefonen.", error: false, action: "sync" };
     if (!companyId) return { text: "Synkroniseret", error: false, action: "" };
     return null;
   }
@@ -469,6 +607,12 @@
         await postIgnore("/rest/v1/contacts", op.body);
       } else if (op.kind === "followup") {
         await postIgnore("/rest/v1/followups", op.body);
+      } else if (op.kind === "contact_update") {
+        await call("/rest/v1/contacts?id=eq." + encodeURIComponent(op.contactId), {
+          method: "PATCH",
+          prefer: "return=minimal",
+          body: op.body
+        });
       } else if (op.kind === "photo_delete") {
         await removeRow("images", op.body.id);
         await deleteObject(op.body.key);
@@ -926,6 +1070,10 @@
       if (cached && cached.rows && cached.rows.length) {
         state.eventId = cached.eventId || "";
         state.rows = cached.rows.map(attach);
+        state.contacts = cached.contacts || [];
+        state.notes = cached.notes || [];
+        state.followups = cached.followups || [];
+        state.memoryLoaded = !!cached.memory;
         applyOverlay();
         state.busy = false;
         render();
@@ -950,8 +1098,10 @@
         if (err.status === 401) saveSession(null);
         state.error = "Dagen kunne ikke hentes. Åbn appen én gang med net, før messen.";
         render();
-      } else if (err.status === 401) {
-        state.syncAuth = true;
+      } else {
+        state.memoryLoaded = true;
+        if (err.status === 401) state.syncAuth = true;
+        if (state.page === "capture" && state.captureFor) adoptSnapshot(state.captureFor);
         render();
       }
     }
@@ -977,6 +1127,25 @@
     }
     state.rows = rows.map(attach);
     applyOverlay();
+    try {
+      var pack = await Promise.all([
+        call("/rest/v1/contacts?select=id,company_id,name,title,email,phone,created_at&limit=1000"),
+        call("/rest/v1/notes?select=id,company_id,body,created_at&limit=1000"),
+        call("/rest/v1/followups?select=id,company_id,title,done,created_at&limit=1000")
+      ]);
+      state.contacts = pack[0] || [];
+      state.notes = pack[1] || [];
+      state.followups = pack[2] || [];
+    } catch (err) {
+      state.contacts = state.contacts || [];
+      state.notes = state.notes || [];
+      state.followups = state.followups || [];
+    }
+    state.memoryLoaded = true;
+    if (state.page === "capture" && state.captureFor) {
+      if (state.form && state.form.dirty) adoptSnapshot(state.captureFor);
+      else fillForm(state.captureFor);
+    }
     reopenMedia();
     state.busy = false;
     render();
@@ -1175,7 +1344,10 @@
       el("button", { class: "link", type: "button", onclick: closeMission }, [state.missionBack === "hall" ? "Tilbage" : "Luk"])
     ]));
     root.appendChild(el("h1", null, [row.name]));
+    root.appendChild(syncLine(""));
     if (state.savedName) root.appendChild(el("p", { class: "done" }, [state.savedName + " er gemt."]));
+    var glance = visitGlance(row);
+    if (glance) root.appendChild(el("p", { class: "quiet" }, [glance]));
     var line = profileLine(row);
     if (line) root.appendChild(el("p", { class: "ai" }, [line]));
     var asks = questions(row);
@@ -1186,11 +1358,66 @@
       el("button", { class: "choice", type: "button", onclick: function () { mark(row, "skip"); } }, ["Spring over"])
     ]));
     if (state.error) root.appendChild(el("p", { class: "error" }, [state.error]));
+    renderStandMates(row);
+  }
+
+  function visitGlance(row) {
+    var parts = [];
+    if (outcomes[row.relevance]) parts.push(outcomes[row.relevance]);
+    if (row.next_step) parts.push(row.next_step);
+    return parts.join(" · ");
+  }
+
+  function mateLabel(row) {
+    if (row.visit_plan === "visited") return "Besøgt";
+    if (row.visit_plan === "skip") return "Sprunget over";
+    if (row.visit_plan === "return_later") return "Kom tilbage";
+    if (row.visit_plan === "must_visit") return "Skal besøges";
+    return "Ikke besøgt";
+  }
+
+  function standMates(row) {
+    if (!hasStand(row)) return [];
+    var stand = String(row.stand_number).trim();
+    return state.rows.filter(function (other) {
+      return other.id !== row.id && other.hall === row.hall && hasStand(other) && String(other.stand_number).trim() === stand;
+    }).sort(function (a, b) { return a.name.localeCompare(b.name, "da"); });
+  }
+
+  function renderStandMates(row) {
+    var mates = standMates(row);
+    if (!mates.length) return;
+    root.appendChild(el("p", { class: "kicker section" }, ["Andre virksomheder på denne stand"]));
+    mates.forEach(function (mate) {
+      root.appendChild(el("button", {
+        class: "company",
+        type: "button",
+        onclick: function () { openStandMate(mate); }
+      }, [
+        el("b", null, [mate.name]),
+        el("span", null, [mateLabel(mate)])
+      ]));
+    });
+  }
+
+  function openStandMate(row) {
+    var queue = state.mission.slice();
+    var found = -1;
+    queue.forEach(function (item, at) { if (item.id === row.id) found = at; });
+    if (found >= 0) state.index = found;
+    else {
+      queue.splice(state.index, 0, row);
+      state.mission = queue;
+    }
+    state.savedName = "";
+    state.error = "";
+    state.page = "mission";
+    render();
   }
 
   function openCapture(row) {
     state.captureFor = row;
-    state.form = blankForm();
+    fillForm(row);
     state.page = "capture";
     state.error = "";
     state.saved = "";
@@ -1255,7 +1482,11 @@
     root.appendChild(el("p", { class: "kicker" }, ["Mine noter"]));
     var notes = el("textarea", { class: "area", placeholder: "Skriv det, du hørte." });
     notes.value = form.notes;
-    notes.addEventListener("input", function () { form.notes = notes.value; });
+    notes.addEventListener("input", function () {
+      form.notes = notes.value;
+      form.touched.notes = true;
+      form.dirty = true;
+    });
     root.appendChild(notes);
     root.appendChild(el("p", { class: "kicker" }, ["Kontaktperson"]));
     if (!form.contactOpen) {
@@ -1273,8 +1504,14 @@
     renderPhotos(row.id);
     renderVoices(row.id);
     if (state.error) root.appendChild(el("p", { class: "error" }, [state.error]));
+    var ready = !!(form.ready || state.memoryLoaded);
     root.appendChild(el("div", { class: "dock" }, [
-      el("button", { class: "action", type: "button", onclick: saveCapture }, [state.saving ? "Gemmer…" : "Gem og gå videre"])
+      el("button", {
+        class: "action",
+        type: "button",
+        disabled: ready ? null : "",
+        onclick: saveCapture
+      }, [ready ? (state.saving ? "Gemmer…" : "Gem og gå videre") : "Henter…"])
     ]));
   }
 
@@ -1285,6 +1522,8 @@
         type: "button",
         onclick: function () {
           state.form[key] = id;
+          state.form.touched[key] = true;
+          state.form.dirty = true;
           if (key === "result") state.error = "";
           render();
         }
@@ -1297,14 +1536,23 @@
       return el("button", {
         class: state.form[key] === id ? "on" : "",
         type: "button",
-        onclick: function () { state.form[key] = state.form[key] === id && key === "level" ? "" : id; render(); }
+        onclick: function () {
+          state.form[key] = state.form[key] === id && key === "level" ? "" : id;
+          state.form.touched[key] = true;
+          state.form.dirty = true;
+          render();
+        }
       }, [options[id]]);
     }));
   }
 
   function field(label, key, type) {
     var input = el("input", { class: "field", type: type, placeholder: label, value: state.form[key] });
-    input.addEventListener("input", function () { state.form[key] = input.value; });
+    input.addEventListener("input", function () {
+      state.form[key] = input.value;
+      state.form.touched[key] = true;
+      state.form.dirty = true;
+    });
     return input;
   }
 
@@ -1976,10 +2224,30 @@
     rec.start();
   }
 
+  function textOp(companyId, kind, body, when) {
+    var op = {
+      id: crypto.randomUUID(),
+      userId: userId(),
+      companyId: companyId,
+      kind: kind,
+      body: body,
+      status: "pending",
+      attempts: 0,
+      error: "",
+      createdAt: when,
+      cancel: false,
+      uploaded: false
+    };
+    if (body && body.id === "") body.id = op.id;
+    return op;
+  }
+
   async function saveCapture() {
     var row = state.captureFor;
     var form = state.form;
-    if (!form.result) {
+    var snapshot = form.snapshot || {};
+    if (!form.ready && !state.memoryLoaded) return;
+    if (!form.result && !snapshot.result) {
       state.error = "Vælg et udfald.";
       render();
       return;
@@ -1988,110 +2256,121 @@
     state.saving = true;
     state.error = "";
     render();
-    var when = new Date().toISOString();
-    var action = form.action && form.action !== "none" ? actions[form.action] : "";
-    var visit = {
-      visit_plan: form.action === "again" ? "return_later" : "visited",
-      relevance: form.result,
-      next_step: action,
-      summary: form.notes.trim(),
-      sales_opportunity: form.level || "",
-      visited_at: when,
-      updated_at: when
-    };
+    var stamp = Date.now();
+    function at(offset) { return new Date(stamp + offset).toISOString(); }
     var ops = [];
-    var pending = mine(row.id).filter(function (item) {
-      return item.kind === "visit" && item.status !== "sending";
-    })[0];
-    var previousBody = pending ? Object.assign({}, pending.body) : null;
-    if (pending) {
-      pending.body = Object.assign({}, pending.body, visit);
-      pending.status = "pending";
-      pending.error = "";
-      pending.createdAt = when;
-      ops.push(pending);
-    } else {
-      ops.push({
-        id: crypto.randomUUID(),
-        userId: userId(),
-        companyId: row.id,
-        kind: "visit",
-        body: visit,
-        status: "pending",
-        attempts: 0,
-        error: "",
-        createdAt: when,
-        cancel: false,
-        uploaded: false
-      });
+    var visit = {};
+    if (form.result && form.result !== snapshot.result) visit.relevance = form.result;
+    if ((form.action || "none") !== (snapshot.action || "none")) {
+      visit.next_step = form.action && form.action !== "none" ? actions[form.action] : "";
     }
-    if (form.name.trim()) {
-      ops.push({
-        id: crypto.randomUUID(),
-        userId: userId(),
-        companyId: row.id,
-        kind: "contact",
-        body: {
-          id: "",
-          company_id: row.id,
-          name: form.name.trim(),
-          title: form.title.trim(),
-          email: form.email.trim(),
-          phone: form.phone.trim(),
-          source: "fair",
-          created_at: when
-        },
-        status: "pending",
-        attempts: 0,
-        error: "",
-        createdAt: when,
-        cancel: false,
-        uploaded: false
-      });
-      ops[ops.length - 1].body.id = ops[ops.length - 1].id;
+    if ((form.level || "") !== (snapshot.level || "")) visit.sales_opportunity = form.level || "";
+    var note = (form.notes || "").trim();
+    var previousNote = (snapshot.notes || "").trim();
+    if (note && note !== previousNote) visit.summary = note;
+    var nextPlan = form.action === "again" ? "return_later" : "visited";
+    if ((form.result || snapshot.result) && row.visit_plan !== nextPlan && (Object.keys(visit).length || row.visit_plan === "unset" || row.visit_plan === "must_visit" || row.visit_plan === "skip")) {
+      visit.visit_plan = nextPlan;
     }
-    if (form.notes.trim()) {
-      ops.push({
-        id: crypto.randomUUID(),
-        userId: userId(),
-        companyId: row.id,
-        kind: "note",
-        body: { id: "", company_id: row.id, body: form.notes.trim(), created_at: when },
-        status: "pending",
-        attempts: 0,
-        error: "",
-        createdAt: when,
-        cancel: false,
-        uploaded: false
-      });
-      ops[ops.length - 1].body.id = ops[ops.length - 1].id;
+    var pending = null;
+    var previousBody = null;
+    if (Object.keys(visit).length) {
+      visit.updated_at = at(0);
+      if (visit.visit_plan) visit.visited_at = at(0);
+      pending = mine(row.id).filter(function (item) {
+        return item.kind === "visit" && item.status !== "sending";
+      })[0];
+      previousBody = pending ? Object.assign({}, pending.body) : null;
+      if (pending) {
+        pending.body = Object.assign({}, pending.body, visit);
+        pending.status = "pending";
+        pending.error = "";
+        pending.createdAt = at(0);
+        ops.push(pending);
+      } else {
+        ops.push(textOp(row.id, "visit", visit, at(0)));
+      }
     }
-    if (action) {
-      ops.push({
-        id: crypto.randomUUID(),
-        userId: userId(),
-        companyId: row.id,
-        kind: "followup",
-        body: { id: "", company_id: row.id, title: action, source: "fair", created_at: when },
-        status: "pending",
-        attempts: 0,
-        error: "",
-        createdAt: when,
-        cancel: false,
-        uploaded: false
-      });
-      ops[ops.length - 1].body.id = ops[ops.length - 1].id;
+    if (note && note !== previousNote && !knownNotes(row.id).some(function (item) { return (item.body || "").trim() === note; })) {
+      ops.push(textOp(row.id, "note", { id: "", company_id: row.id, body: note, created_at: at(1) }, at(1)));
+    }
+    var contact = latestContact(row.id);
+    var patch = {};
+    ["name", "title", "email", "phone"].forEach(function (key) {
+      var value = (form[key] || "").trim();
+      if (!value) return;
+      var before = contact ? (contact[key] || "") : "";
+      if (value !== before) patch[key] = value;
+    });
+    var queued = null;
+    var queuedBody = null;
+    if (contact && Object.keys(patch).length) {
+      queued = mine(row.id).filter(function (item) {
+        return item.kind === "contact" && item.id === contact.id && item.status !== "sending";
+      })[0];
+      if (queued) {
+        queuedBody = Object.assign({}, queued.body);
+        queued.body = Object.assign({}, queued.body, patch);
+        queued.status = "pending";
+        queued.error = "";
+        queued.createdAt = at(2);
+        ops.push(queued);
+      } else {
+        var update = textOp(row.id, "contact_update", patch, at(2));
+        update.contactId = contact.id;
+        ops.push(update);
+      }
+    } else if (!contact && (form.name || "").trim()) {
+      ops.push(textOp(row.id, "contact", {
+        id: "",
+        company_id: row.id,
+        name: (form.name || "").trim(),
+        title: (form.title || "").trim(),
+        email: (form.email || "").trim(),
+        phone: (form.phone || "").trim(),
+        source: "fair",
+        created_at: at(2)
+      }, at(2)));
+    }
+    var actionTitle = form.action && form.action !== "none" ? actions[form.action] : "";
+    if (actionTitle && !hasOpenFollowup(row.id, actionTitle)) {
+      ops.push(textOp(row.id, "followup", {
+        id: "",
+        company_id: row.id,
+        title: actionTitle,
+        source: "fair",
+        created_at: at(3)
+      }, at(3)));
+    }
+    if (!ops.length) {
+      state.saving = false;
+      state.savedName = shortCompany(row.name);
+      saveHere(row);
+      advance();
+      return;
     }
     try {
       await rememberAll(ops);
-      Object.assign(row, visit);
+      if (Object.keys(visit).length) Object.assign(row, visit);
+      ops.forEach(function (op) {
+        if (op.kind === "note") state.notes = [op.body].concat(state.notes || []);
+        if (op.kind === "contact") state.contacts = [op.body].concat(state.contacts || []);
+        if (op.kind === "followup") state.followups = [op.body].concat(state.followups || []);
+        if (op.kind === "contact_update") {
+          (state.contacts || []).forEach(function (item) {
+            if (item.id === op.contactId) Object.assign(item, op.body);
+          });
+        }
+      });
       saveHere(row);
       state.savedName = shortCompany(row.name);
       state.saving = false;
       advance();
       flush();
+      saveFair();
     } catch (err) {
       if (pending && previousBody) pending.body = previousBody;
+      if (queued && queuedBody) queued.body = queuedBody;
       state.saving = false;
       state.error = keepMessage(err) || "Samtalen kunne ikke gemmes. Prøv igen, før du går videre.";
       render();
@@ -2461,19 +2740,34 @@
     if (!exhibitor) return;
     var outcome = outcomes[exhibitor.relevance] || "";
     var suggestion = suggestions[exhibitor.suggestion] || "";
-    if (exhibitor.summary) {
+    var level = levels[exhibitor.sales_opportunity] || "";
+    var note = visibleNote(exhibitor);
+    if (note) {
       root.appendChild(el("article", { class: "card qcard" }, [
         el("p", { class: "kicker" }, ["Mine noter"]),
-        el("p", { class: "ask" }, [exhibitor.summary])
+        el("p", { class: "ask" }, [note])
       ]));
     }
-    if (outcome || suggestion) {
+    if (outcome || suggestion || level || exhibitor.next_step) {
       root.appendChild(el("div", { class: "badges" }, [
         outcome ? el("span", { class: "pill" }, [outcome]) : null,
+        level ? el("span", { class: "pill" }, [level]) : null,
+        exhibitor.next_step ? el("span", { class: "pill outline" }, [exhibitor.next_step]) : null,
         suggestion ? el("span", { class: "pill outline" }, ["Forslag: " + suggestion]) : null
       ]));
       if (exhibitor.suggestion_reason) root.appendChild(el("p", { class: "quiet" }, [exhibitor.suggestion_reason]));
     }
+    knownContacts(exhibitor.id).forEach(function (contact) {
+      var lines = [];
+      if (contact.title) lines.push(contact.title);
+      if (contact.email) lines.push(contact.email);
+      if (contact.phone) lines.push(contact.phone);
+      if (!contact.name && !lines.length) return;
+      var kids = [el("p", { class: "kicker" }, ["Kontaktperson"])];
+      if (contact.name) kids.push(el("p", { class: "ask" }, [contact.name]));
+      lines.forEach(function (line) { kids.push(el("p", { class: "quiet" }, [line])); });
+      root.appendChild(el("article", { class: "card qcard" }, kids));
+    });
     if (exhibitor.fair_summary) {
       root.appendChild(el("article", { class: "card qcard" }, [
         el("p", { class: "kicker" }, ["Samtalen"]),
@@ -2502,9 +2796,9 @@
   }
 
   function openFollowup(companyId) {
-    return (state.followups || []).filter(function (item) {
+    return allFollowups().filter(function (item) {
       return item.company_id === companyId && !item.done;
-    })[0] || null;
+    }).sort(byNewest)[0] || null;
   }
 
   function latestRun() {
@@ -2518,7 +2812,7 @@
   async function refreshAfter() {
     try {
       state.runs = await call("/rest/v1/fair_runs?select=id,status,step,note,error,created_at&order=created_at.desc&limit=1");
-      state.followups = await call("/rest/v1/followups?select=id,company_id,title,done&limit=1000");
+      state.followups = await call("/rest/v1/followups?select=id,company_id,title,done,created_at&limit=1000");
       state.afterError = "";
     } catch (err) {
       state.afterError = "Analysen er ikke klar endnu.";
@@ -2605,42 +2899,105 @@
         onclick: startAnalysis
       }, [state.afterBusy ? "Starter…" : (run && run.status === "error" ? "Prøv igen" : "Start analysen")]));
     }
-    var rows = state.rows.filter(function (row) {
-      return outcomes[row.relevance] || openFollowup(row.id);
-    });
-    var doing = rows.filter(function (row) { return openFollowup(row.id); }).sort(compareAfter);
-    var quiet = rows.filter(function (row) { return !openFollowup(row.id); }).sort(compareAfter);
-    if (!doing.length && !quiet.length) {
-      root.appendChild(el("p", { class: "hint" }, ["Ingen opfølgninger endnu."]));
-      return;
-    }
-    renderAfterGroup("Skal gøres", doing);
-    renderAfterGroup("Uden næste handling", quiet);
+    var search = el("input", { class: "field search", type: "search", placeholder: "Navn eller stand", value: state.afterQuery });
+    search.addEventListener("input", function () { state.afterQuery = search.value; paintAfter(); });
+    root.appendChild(search);
+    root.appendChild(el("div", { id: "after-list" }));
+    paintAfter();
   }
 
-  function renderAfterGroup(title, rows) {
-    if (!rows.length) return;
-    root.appendChild(el("p", { class: "kicker section" }, [title]));
+  function afterBucket(row) {
+    if (row.relevance === "hot") return "hot";
+    var followup = openFollowup(row.id);
+    var byTitle = {
+      "Book demo": "demo",
+      "Partnerdialog": "partner",
+      "Send mail": "email",
+      "Ring": "call",
+      "Besøg igen": "again"
+    };
+    if (followup) return byTitle[followup.title] || ("other:" + followup.title);
+    if (row.relevance === "interesting") return "interesting";
+    if (row.relevance === "maybe") return "maybe";
+    if (row.relevance === "not_interesting") return "cold";
+    return "";
+  }
+
+  function paintAfter() {
+    var list = document.getElementById("after-list");
+    if (!list) return;
+    clear(list);
+    var q = (state.afterQuery || "").trim().toLowerCase();
+    var searching = q.length >= 2;
+    var rows = state.rows.filter(function (row) {
+      if (!(outcomes[row.relevance] || openFollowup(row.id))) return false;
+      if (!searching) return true;
+      return (row.name || "").toLowerCase().indexOf(q) !== -1 || (row.stand_number || "").toLowerCase().indexOf(q) !== -1;
+    });
+    if (!rows.length) {
+      list.appendChild(el("p", { class: "hint" }, [searching ? "Ingen virksomhed med det navn." : "Ingen opfølgninger endnu."]));
+      return;
+    }
+    var order = [
+      ["hot", "Hot Lead"],
+      ["demo", "Book demo"],
+      ["partner", "Partnerdialog"],
+      ["email", "Send mail"],
+      ["call", "Ring"],
+      ["again", "Besøg igen"],
+      ["interesting", "Interessant"],
+      ["maybe", "Måske interessant"],
+      ["cold", "Ikke interessant"]
+    ];
+    var buckets = {};
     rows.forEach(function (row) {
-      var followup = openFollowup(row.id);
-      var suggestion = suggestions[row.suggestion] || "";
-      var line = [outcomes[row.relevance] || "", suggestion ? "Forslag: " + suggestion : "", followup ? followup.title : "Ingen"].filter(Boolean).join(" · ");
-      root.appendChild(el("article", null, [
-        el("button", {
-          class: "company",
-          type: "button",
-          onclick: function () { openProfile(row.company_id || row.id, "after"); }
-        }, [
-          el("b", null, [row.name]),
-          el("span", null, [standLabel(row) + (line ? " · " + line : "")])
-        ]),
-        followup ? el("button", {
+      var key = afterBucket(row);
+      if (!key) return;
+      if (!buckets[key]) buckets[key] = [];
+      buckets[key].push(row);
+    });
+    Object.keys(buckets).forEach(function (key) {
+      if (order.some(function (item) { return item[0] === key; })) return;
+      order.splice(6, 0, [key, key.slice(6) || key]);
+    });
+    order.forEach(function (item) {
+      var group = buckets[item[0]];
+      if (!group || !group.length) return;
+      group.sort(function (a, b) { return a.name.localeCompare(b.name, "da"); });
+      if (item[0] === "cold" && !state.afterColdOpen && !searching) {
+        list.appendChild(el("button", {
           class: "choice slim",
           type: "button",
-          onclick: function () { markFollowup(followup); }
-        }, ["Marker som gjort"]) : null
-      ]));
+          onclick: function () { state.afterColdOpen = true; paintAfter(); }
+        }, ["Ikke interessant · " + group.length]));
+        return;
+      }
+      list.appendChild(el("p", { class: "kicker section" }, [item[1]]));
+      group.forEach(function (row) { list.appendChild(afterRow(row, item[1])); });
     });
+  }
+
+  function afterRow(row, groupTitle) {
+    var followup = openFollowup(row.id);
+    var bits = [standLabel(row)];
+    if (outcomes[row.relevance] && outcomes[row.relevance] !== groupTitle) bits.push(outcomes[row.relevance]);
+    if (followup && followup.title !== groupTitle) bits.push(followup.title);
+    if (suggestions[row.suggestion]) bits.push("Forslag: " + suggestions[row.suggestion]);
+    return el("article", null, [
+      el("button", {
+        class: "company",
+        type: "button",
+        onclick: function () { openProfile(row.company_id || row.id, "after"); }
+      }, [
+        el("b", null, [row.name]),
+        el("span", null, [bits.join(" · ")])
+      ]),
+      followup ? el("button", {
+        class: "choice slim",
+        type: "button",
+        onclick: function () { markFollowup(followup); }
+      }, ["Marker som gjort"]) : null
+    ]);
   }
 
   function renderNav() {
