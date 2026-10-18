@@ -27,10 +27,21 @@
     missionBack: "",
     photos: {},
     photoError: "",
-    photoBusy: false
+    photoBusy: false,
+    voices: {},
+    voiceError: "",
+    voiceBusy: false,
+    voiceArming: false,
+    recording: null,
+    playingId: "",
+    playingFor: ""
   };
   var PHOTO_MAX_SIDE = 3200;
   var PHOTO_JPEG_QUALITY = 0.92;
+  var VOICE_BITRATE = 128000;
+  var VOICE_MAX_MS = 180000;
+  var VOICE_MIN_MS = 500;
+  var player = new Audio();
 
   var outcomes = {
     not_interesting: "Ikke interessant",
@@ -363,6 +374,7 @@
   }
 
   function render() {
+    parkVoice();
     clear(root);
     var bare = state.page === "mission" || state.page === "capture" || state.page === "profile";
     root.className = "phone" + (bare ? " bare" : "") + (state.page === "capture" ? " capture" : "");
@@ -655,6 +667,7 @@
     state.saved = "";
     state.savedName = "";
     state.photoError = "";
+    state.voiceError = "";
     render();
   }
 
@@ -728,6 +741,7 @@
       root.appendChild(field("Telefon", "phone", "tel"));
     }
     renderPhotos(row.id);
+    renderVoices(row.id);
     if (state.error) root.appendChild(el("p", { class: "error" }, [state.error]));
     root.appendChild(el("div", { class: "dock" }, [
       el("button", { class: "action", type: "button", onclick: saveCapture }, [state.busy ? "Gemmer…" : "Gem og gå videre"])
@@ -963,6 +977,378 @@
       render();
     } catch (err) {
       state.photoError = "Billedet kunne ikke slettes.";
+      render();
+    }
+  }
+
+  function visibleVoiceCompany() {
+    if (state.page === "capture" && state.captureFor) return state.captureFor.id;
+    if (state.page === "profile" && state.profile) {
+      var row = exhibitorRow(state.profile.id);
+      return row ? row.id : "";
+    }
+    return "";
+  }
+
+  function parkVoice() {
+    var visible = visibleVoiceCompany();
+    if (state.playingId && state.playingFor !== visible) {
+      player.pause();
+      state.playingId = "";
+    }
+    if (!state.recording || state.recording.stopping) return;
+    if (state.recording.exhibitorId === visible) return;
+    finishRecording(true);
+  }
+
+  function clock(seconds) {
+    var total = Math.max(0, Math.round(Number(seconds) || 0));
+    var mins = Math.floor(total / 60);
+    var secs = total % 60;
+    return mins + ":" + (secs < 10 ? "0" : "") + secs;
+  }
+
+  function stopLabel(recording) {
+    return "Stop · " + clock((Date.now() - recording.started) / 1000);
+  }
+
+  function renderVoices(exhibitorId) {
+    if (!exhibitorId) return;
+    ensureVoices(exhibitorId);
+    var live = state.recording && state.recording.exhibitorId === exhibitorId;
+    var button = el("button", {
+      class: "choice record" + (live ? " on" : ""),
+      type: "button",
+      onclick: function () {
+        if (state.voiceBusy || state.voiceArming) return;
+        if (state.recording && state.recording.exhibitorId === exhibitorId) finishRecording(true);
+        else if (!state.recording) startVoice(exhibitorId);
+      }
+    }, [live ? stopLabel(state.recording) : "Optag"]);
+    if (live) state.recording.label = button;
+    root.appendChild(el("p", { class: "kicker section" }, ["Stemmenoter"]));
+    root.appendChild(button);
+    if (state.voiceBusy) root.appendChild(el("p", { class: "quiet" }, ["Gemmer stemmenoten…"]));
+    if (state.voiceError) root.appendChild(el("p", { class: "error" }, [state.voiceError]));
+    var slot = state.voices[exhibitorId];
+    if (!slot || slot.status === "loading") return;
+    if (slot.status === "error") {
+      root.appendChild(el("p", { class: "error" }, ["Stemmenoterne kunne ikke hentes."]));
+      return;
+    }
+    if (!slot.items.length) {
+      root.appendChild(el("p", { class: "quiet" }, ["Ingen stemmenoter endnu."]));
+      return;
+    }
+    slot.items.forEach(function (item) {
+      var selected = slot.selected === item.id;
+      var playing = state.playingId === item.id;
+      root.appendChild(el("div", { class: "voicenote" }, [
+        el("button", {
+          class: "choice" + (playing ? " on" : ""),
+          type: "button",
+          onclick: function () { togglePlay(exhibitorId, item); }
+        }, [playing ? "Stop" : "Afspil"]),
+        el("button", {
+          class: "choice" + (selected ? " on" : ""),
+          type: "button",
+          onclick: function () {
+            slot.selected = selected ? "" : item.id;
+            render();
+          }
+        }, [clock(item.duration_sec)])
+      ]));
+    });
+    if (slot.selected) {
+      root.appendChild(el("button", {
+        class: "choice slim",
+        type: "button",
+        onclick: function () { removeVoice(exhibitorId, slot.selected); }
+      }, ["Slet"]));
+    }
+  }
+
+  function ensureVoices(exhibitorId) {
+    var slot = state.voices[exhibitorId];
+    if (slot && slot.status) return;
+    state.voices[exhibitorId] = { status: "loading", items: [], urls: {}, selected: "" };
+    loadVoices(exhibitorId);
+  }
+
+  async function loadVoices(exhibitorId) {
+    try {
+      var items = await call("/rest/v1/voice_notes?select=id,audio_key,duration_sec,created_at&company_id=eq." + encodeURIComponent(exhibitorId) + "&order=created_at.desc");
+      var urls = {};
+      await Promise.all(items.map(async function (item) {
+        urls[item.id] = await fetchVoiceUrl(item.audio_key);
+      }));
+      var previous = state.voices[exhibitorId] || {};
+      state.voices[exhibitorId] = {
+        status: "ready",
+        items: items,
+        urls: urls,
+        selected: previous.selected || ""
+      };
+    } catch (err) {
+      state.voices[exhibitorId] = { status: "error", items: [], urls: {}, selected: "" };
+    }
+    render();
+  }
+
+  async function fetchVoiceUrl(audioKey) {
+    var response = await fetch(cfg.url + "/storage/v1/object/authenticated/captures/" + storagePath(audioKey), {
+      headers: authHeaders()
+    });
+    if (!response.ok) throw new Error("voice");
+    return URL.createObjectURL(await response.blob());
+  }
+
+  function pickVoiceMime() {
+    var types = ["audio/mp4", "audio/aac", "audio/webm;codecs=opus", "audio/webm"];
+    if (!window.MediaRecorder || !MediaRecorder.isTypeSupported) return "";
+    for (var i = 0; i < types.length; i += 1) {
+      if (MediaRecorder.isTypeSupported(types[i])) return types[i];
+    }
+    return "";
+  }
+
+  function openRecorder(stream) {
+    var mime = pickVoiceMime();
+    var attempts = [];
+    if (mime) {
+      attempts.push({ mimeType: mime, audioBitsPerSecond: VOICE_BITRATE });
+      attempts.push({ mimeType: mime });
+    }
+    attempts.push({ audioBitsPerSecond: VOICE_BITRATE });
+    attempts.push(null);
+    var last = null;
+    for (var i = 0; i < attempts.length; i += 1) {
+      try {
+        return attempts[i] ? new MediaRecorder(stream, attempts[i]) : new MediaRecorder(stream);
+      } catch (err) {
+        last = err;
+      }
+    }
+    throw last || new Error("recorder");
+  }
+
+  function voiceSuffix(mime) {
+    var type = String(mime || "").toLowerCase();
+    if (type.indexOf("webm") >= 0) return "webm";
+    if (type.indexOf("ogg") >= 0) return "ogg";
+    return "m4a";
+  }
+
+  async function micStream() {
+    var voice = {
+      channelCount: { ideal: 1 },
+      sampleRate: { ideal: 48000 },
+      echoCancellation: true,
+      noiseSuppression: true
+    };
+    var tries = [
+      { audio: Object.assign({}, voice, { channelCount: { exact: 1 } }) },
+      { audio: voice },
+      { audio: true }
+    ];
+    var last = null;
+    for (var i = 0; i < tries.length; i += 1) {
+      try { return await navigator.mediaDevices.getUserMedia(tries[i]); }
+      catch (err) {
+        last = err;
+        if (err && (err.name === "NotAllowedError" || err.name === "SecurityError")) throw err;
+      }
+    }
+    throw last || new Error("mic");
+  }
+
+  async function startVoice(exhibitorId) {
+    if (state.recording || state.voiceBusy || state.voiceArming) return;
+    if (!navigator.mediaDevices || !window.MediaRecorder) {
+      state.voiceError = "Telefonen kan ikke optage lyd.";
+      render();
+      return;
+    }
+    state.voiceArming = true;
+    state.voiceError = "";
+    var stream = null;
+    try {
+      stream = await micStream();
+      var recorder = openRecorder(stream);
+      var chunks = [];
+      recorder.addEventListener("dataavailable", function (event) {
+        if (event.data && event.data.size) chunks.push(event.data);
+      });
+      var recording = {
+        exhibitorId: exhibitorId,
+        started: Date.now(),
+        stream: stream,
+        recorder: recorder,
+        chunks: chunks,
+        mime: recorder.mimeType || pickVoiceMime() || "audio/mp4",
+        timer: 0,
+        label: null,
+        stopping: false,
+        shown: ""
+      };
+      recorder.start();
+      recording.timer = setInterval(function () {
+        if (state.recording !== recording || recording.stopping) return;
+        if (Date.now() - recording.started >= VOICE_MAX_MS) {
+          finishRecording(true);
+          return;
+        }
+        var text = stopLabel(recording);
+        if (text !== recording.shown && recording.label && recording.label.isConnected) {
+          recording.shown = text;
+          recording.label.textContent = text;
+        }
+      }, 250);
+      state.recording = recording;
+      state.voiceArming = false;
+      render();
+    } catch (err) {
+      if (stream) stream.getTracks().forEach(function (track) { track.stop(); });
+      state.voiceArming = false;
+      state.voiceError = err && err.name === "NotAllowedError"
+        ? "Telefonen skal have lov til mikrofonen."
+        : "Telefonen kan ikke optage lyd.";
+      render();
+    }
+  }
+
+  function stopRecorder(recording) {
+    return new Promise(function (resolve) {
+      var recorder = recording.recorder;
+      function pack() {
+        resolve(new Blob(recording.chunks, { type: recorder.mimeType || recording.mime || "audio/mp4" }));
+      }
+      if (recorder.state === "inactive") {
+        pack();
+        return;
+      }
+      recorder.addEventListener("stop", pack, { once: true });
+      try { recorder.stop(); }
+      catch (err) { pack(); }
+    });
+  }
+
+  async function finishRecording(save) {
+    var recording = state.recording;
+    if (!recording || recording.stopping) return;
+    recording.stopping = true;
+    clearInterval(recording.timer);
+    var elapsed = Date.now() - recording.started;
+    var blob = await stopRecorder(recording);
+    recording.stream.getTracks().forEach(function (track) { track.stop(); });
+    if (state.recording === recording) state.recording = null;
+    if (!save || elapsed < VOICE_MIN_MS) {
+      render();
+      return;
+    }
+    if (!blob || !blob.size) {
+      state.voiceError = "Stemmenoten blev ikke gemt. Prøv igen.";
+      render();
+      return;
+    }
+    await storeVoice(recording.exhibitorId, blob, elapsed / 1000);
+  }
+
+  async function putVoice(key, blob) {
+    var type = blob.type || "audio/mp4";
+    var response = await fetch(cfg.url + "/storage/v1/object/captures/" + storagePath(key), {
+      method: "POST",
+      headers: Object.assign(authHeaders(), { "Content-Type": type, "x-upsert": "true" }),
+      body: blob
+    });
+    if (!response.ok) throw new Error("upload");
+  }
+
+  async function storeVoice(exhibitorId, blob, seconds) {
+    state.voiceBusy = true;
+    state.voiceError = "";
+    render();
+    var key = "";
+    try {
+      var id = crypto.randomUUID();
+      key = "voice/" + exhibitorId + "/" + id + "." + voiceSuffix(blob.type);
+      var when = new Date().toISOString();
+      await putVoice(key, blob);
+      await call("/rest/v1/voice_notes", {
+        method: "POST",
+        prefer: "return=minimal",
+        body: {
+          id: id,
+          company_id: exhibitorId,
+          audio_key: key,
+          transcript: "",
+          duration_sec: Math.round(seconds * 10) / 10,
+          created_at: when
+        }
+      });
+      var slot = state.voices[exhibitorId] || { status: "ready", items: [], urls: {}, selected: "" };
+      slot.status = "ready";
+      slot.items = [{ id: id, audio_key: key, duration_sec: Math.round(seconds * 10) / 10, created_at: when }].concat(slot.items || []);
+      slot.urls[id] = URL.createObjectURL(blob);
+      state.voices[exhibitorId] = slot;
+      state.voiceBusy = false;
+      render();
+    } catch (err) {
+      if (key) {
+        try { await deleteObject(key); } catch (ignore) { /* rækken blev ikke oprettet */ }
+      }
+      state.voiceBusy = false;
+      state.voiceError = "Stemmenoten blev ikke gemt. Prøv igen.";
+      render();
+    }
+  }
+
+  function togglePlay(exhibitorId, item) {
+    var slot = state.voices[exhibitorId];
+    var url = slot && slot.urls[item.id];
+    if (!url) return;
+    if (state.playingId === item.id) {
+      player.pause();
+      state.playingId = "";
+      render();
+      return;
+    }
+    state.playingId = item.id;
+    state.playingFor = exhibitorId;
+    player.src = url;
+    player.onended = function () {
+      if (state.playingId !== item.id) return;
+      state.playingId = "";
+      render();
+    };
+    player.play().catch(function () {
+      state.playingId = "";
+      state.voiceError = "Stemmenoten kunne ikke afspilles.";
+      render();
+    });
+    render();
+  }
+
+  async function removeVoice(exhibitorId, voiceId) {
+    var slot = state.voices[exhibitorId];
+    if (!slot) return;
+    var item = slot.items.filter(function (row) { return row.id === voiceId; })[0];
+    if (!item) return;
+    state.voiceError = "";
+    if (state.playingId === voiceId) {
+      player.pause();
+      state.playingId = "";
+    }
+    try {
+      await deleteObject(item.audio_key);
+      await call("/rest/v1/voice_notes?id=eq." + encodeURIComponent(voiceId), { method: "DELETE", prefer: "return=minimal" });
+      if (slot.urls[voiceId]) URL.revokeObjectURL(slot.urls[voiceId]);
+      delete slot.urls[voiceId];
+      slot.items = slot.items.filter(function (row) { return row.id !== voiceId; });
+      slot.selected = "";
+      render();
+    } catch (err) {
+      state.voiceError = "Stemmenoten kunne ikke slettes.";
       render();
     }
   }
@@ -1250,6 +1636,7 @@
     state.busy = true;
     state.profileToken = companyId;
     state.photoError = "";
+    state.voiceError = "";
     state.profile = { id: companyId, name: "Henter…" };
     render();
     try {
@@ -1282,6 +1669,7 @@
     ]));
     var exhibitor = exhibitorRow(profile.id);
     if (exhibitor) renderPhotos(exhibitor.id);
+    if (exhibitor) renderVoices(exhibitor.id);
     if (state.busy) {
       root.appendChild(el("p", { class: "hint" }, ["Henter profilen…"]));
       return;
@@ -1434,6 +1822,11 @@
     bootNav();
     originalRender();
   };
+
+  window.addEventListener("pagehide", function () { finishRecording(true); });
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "hidden") finishRecording(true);
+  });
 
   state.session = loadSession();
   if (state.session) boot();

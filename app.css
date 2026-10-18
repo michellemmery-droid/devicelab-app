@@ -121,6 +121,9 @@ h2 { font-size: 2rem; line-height: 1.05; }
 }
 .thumb.on { border-color: var(--ink); }
 .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.record { margin-top: 10px; }
+.voicenote { display: grid; grid-template-columns: 1fr 96px; gap: 10px; margin-top: 10px; }
+.voicenote .choice { min-height: 58px; }
 
 .action, .choice, .field, .area {
   width: 100%;
