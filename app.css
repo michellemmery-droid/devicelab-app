@@ -124,6 +124,12 @@ h2 { font-size: 2rem; line-height: 1.05; }
 .record { margin-top: 10px; }
 .voicenote { display: grid; grid-template-columns: 1fr 96px; gap: 10px; margin-top: 10px; }
 .voicenote .choice { min-height: 58px; }
+.voicenote .media-state { grid-column: 1 / -1; margin: 0; }
+.shot { flex: none; width: 96px; }
+.shot .media-state { display: block; margin-top: 4px; font-size: 0.75rem; line-height: 1.2; }
+.syncbox { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
+.syncbox p { margin: 0; flex: 1; }
+.syncbox .link { flex: none; }
 
 .action, .choice, .field, .area {
   width: 100%;

@@ -34,7 +34,12 @@
     voiceArming: false,
     recording: null,
     playingId: "",
-    playingFor: ""
+    playingFor: "",
+    outbox: [],
+    db: null,
+    syncing: false,
+    syncAuth: false,
+    saving: false
   };
   var PHOTO_MAX_SIDE = 3200;
   var PHOTO_JPEG_QUALITY = 0.92;
@@ -156,6 +161,467 @@
     if (state.here) localStorage.setItem("dl-here", JSON.stringify(state.here));
   }
 
+  function userId() {
+    var token = state.session && state.session.access_token;
+    if (!token) return "";
+    try {
+      var part = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+      while (part.length % 4) part += "=";
+      var data = JSON.parse(atob(part));
+      return data.sub || "";
+    } catch (err) {
+      return "";
+    }
+  }
+
+  function phoneFull(err) {
+    var name = err && err.name;
+    return name === "QuotaExceededError" || name === "NS_ERROR_DOM_QUOTA_REACHED";
+  }
+
+  function keepMessage(err) {
+    return phoneFull(err) ? "Telefonen kunne ikke gemme det. Frigør plads og prøv igen." : "";
+  }
+
+  function openDb() {
+    if (state.db) return Promise.resolve(state.db);
+    return new Promise(function (resolve, reject) {
+      var request = indexedDB.open("devicelab", 1);
+      request.onupgradeneeded = function () {
+        var base = request.result;
+        if (!base.objectStoreNames.contains("fair")) base.createObjectStore("fair");
+        if (!base.objectStoreNames.contains("outbox")) base.createObjectStore("outbox", { keyPath: "id" });
+        if (!base.objectStoreNames.contains("files")) base.createObjectStore("files");
+      };
+      request.onsuccess = function () {
+        state.db = request.result;
+        resolve(state.db);
+      };
+      request.onerror = function () { reject(request.error); };
+    });
+  }
+
+  function idbDone(tx) {
+    return new Promise(function (resolve, reject) {
+      tx.oncomplete = function () { resolve(); };
+      tx.onerror = function () { reject(tx.error); };
+      tx.onabort = function () { reject(tx.error || new Error("afbrudt")); };
+    });
+  }
+
+  async function idbPut(store, value, key) {
+    var base = await openDb();
+    var tx = base.transaction(store, "readwrite");
+    if (key === undefined) tx.objectStore(store).put(value);
+    else tx.objectStore(store).put(value, key);
+    await idbDone(tx);
+  }
+
+  async function idbGet(store, key) {
+    var base = await openDb();
+    return new Promise(function (resolve, reject) {
+      var tx = base.transaction(store, "readonly");
+      var request = tx.objectStore(store).get(key);
+      request.onsuccess = function () { resolve(request.result); };
+      request.onerror = function () { reject(request.error); };
+    });
+  }
+
+  async function idbAll(store) {
+    var base = await openDb();
+    return new Promise(function (resolve, reject) {
+      var tx = base.transaction(store, "readonly");
+      var request = tx.objectStore(store).getAll();
+      request.onsuccess = function () { resolve(request.result || []); };
+      request.onerror = function () { reject(request.error); };
+    });
+  }
+
+  async function remember(op, blob) {
+    var base = await openDb();
+    var tx = base.transaction(blob ? ["outbox", "files"] : ["outbox"], "readwrite");
+    tx.objectStore("outbox").put(op);
+    if (blob) tx.objectStore("files").put(blob, op.id);
+    await idbDone(tx);
+    var known = false;
+    state.outbox.forEach(function (item, index) {
+      if (item.id !== op.id) return;
+      state.outbox[index] = op;
+      known = true;
+    });
+    if (!known) state.outbox.push(op);
+  }
+
+  async function forget(id) {
+    state.outbox = state.outbox.filter(function (item) { return item.id !== id; });
+    var base = await openDb();
+    var tx = base.transaction(["outbox", "files"], "readwrite");
+    tx.objectStore("outbox").delete(id);
+    tx.objectStore("files").delete(id);
+    await idbDone(tx);
+  }
+
+  function mine(companyId) {
+    return state.outbox.filter(function (item) {
+      if (item.userId !== userId() || item.cancel) return false;
+      return !companyId || item.companyId === companyId;
+    });
+  }
+
+  function applyOverlay() {
+    mine().filter(function (item) { return item.kind === "visit"; }).sort(function (a, b) {
+      return a.createdAt < b.createdAt ? -1 : 1;
+    }).forEach(function (item) {
+      var row = state.rows.filter(function (entry) { return entry.id === item.companyId; })[0];
+      if (row) Object.assign(row, item.body);
+    });
+  }
+
+  async function enqueueVisit(companyId, patch) {
+    var pending = mine(companyId).filter(function (item) {
+      return item.kind === "visit" && item.status !== "sending";
+    })[0];
+    var when = patch.updated_at || new Date().toISOString();
+    if (pending) {
+      pending.body = Object.assign({}, pending.body, patch);
+      pending.status = "pending";
+      pending.error = "";
+      pending.createdAt = when;
+      await remember(pending);
+      return pending;
+    }
+    var op = {
+      id: crypto.randomUUID(),
+      userId: userId(),
+      companyId: companyId,
+      kind: "visit",
+      body: patch,
+      status: "pending",
+      attempts: 0,
+      error: "",
+      createdAt: when,
+      cancel: false,
+      uploaded: false
+    };
+    await remember(op);
+    return op;
+  }
+
+  async function enqueueText(companyId, kind, body) {
+    var op = {
+      id: body.id,
+      userId: userId(),
+      companyId: companyId,
+      kind: kind,
+      body: body,
+      status: "pending",
+      attempts: 0,
+      error: "",
+      createdAt: body.created_at,
+      cancel: false,
+      uploaded: false
+    };
+    await remember(op);
+    return op;
+  }
+
+  async function enqueueFile(companyId, kind, body, blob, mime) {
+    var op = {
+      id: body.id,
+      userId: userId(),
+      companyId: companyId,
+      kind: kind,
+      body: body,
+      mime: mime || blob.type || "",
+      status: "pending",
+      attempts: 0,
+      error: "",
+      createdAt: body.created_at,
+      cancel: false,
+      uploaded: false
+    };
+    await remember(op, blob);
+    return op;
+  }
+
+  async function rememberAll(ops) {
+    if (!ops.length) return;
+    var base = await openDb();
+    var tx = base.transaction("outbox", "readwrite");
+    ops.forEach(function (op) { tx.objectStore("outbox").put(op); });
+    await idbDone(tx);
+    ops.forEach(function (op) {
+      var known = false;
+      state.outbox.forEach(function (item, index) {
+        if (item.id !== op.id) return;
+        state.outbox[index] = op;
+        known = true;
+      });
+      if (!known) state.outbox.push(op);
+    });
+  }
+
+  async function saveFair() {
+    var id = userId();
+    if (!id || !state.rows.length) return;
+    try {
+      await idbPut("fair", { eventId: state.eventId, rows: state.rows }, id);
+    } catch (err) { /* dagen kan stadig ligge i hukommelsen */ }
+  }
+
+  function syncView(companyId) {
+    var items = mine(companyId);
+    var failed = items.filter(function (item) { return item.status === "error"; });
+    var waiting = items.filter(function (item) { return item.status !== "error"; });
+    if (state.syncing && (!companyId || items.length)) return { text: "Synkroniserer", error: false, action: "" };
+    if (state.syncAuth && items.length) return { text: "Log ind for at sende det, der venter.", error: true, action: "login" };
+    if (failed.length && waiting.length) {
+      return {
+        text: failed.length + " kunne ikke sendes. " + waiting.length + " afventer synkronisering.",
+        error: true,
+        action: "sync"
+      };
+    }
+    if (failed.length) return { text: failed.length + " kunne ikke sendes. Dataene ligger på telefonen.", error: true, action: "sync" };
+    if (waiting.length) return { text: waiting.length + " afventer synkronisering", error: false, action: "sync" };
+    if (!companyId) return { text: "Synkroniseret", error: false, action: "" };
+    return null;
+  }
+
+  function syncLine(companyId) {
+    var view = syncView(companyId);
+    if (companyId && !view) return null;
+    view = view || { text: "Synkroniseret", error: false, action: "" };
+    var button = null;
+    if (view.action === "sync") {
+      button = el("button", { class: "link", type: "button", onclick: syncNow }, ["Synk nu"]);
+    } else if (view.action === "login") {
+      button = el("button", { class: "link", type: "button", onclick: function () { saveSession(null); render(); } }, ["Log ind"]);
+    }
+    return el("div", { class: "syncbox", "data-sync": companyId || "" }, [
+      el("p", { class: view.error ? "error" : "quiet" }, [view.text]),
+      button
+    ]);
+  }
+
+  function paintSync() {
+    document.querySelectorAll("[data-sync]").forEach(function (node) {
+      var companyId = node.getAttribute("data-sync") || "";
+      var fresh = syncLine(companyId);
+      if (!fresh) {
+        node.remove();
+        return;
+      }
+      node.replaceWith(fresh);
+    });
+  }
+
+  function mediaLabel(id) {
+    var op = state.outbox.filter(function (item) { return item.id === id && !item.cancel; })[0];
+    if (!op) return "";
+    return op.status === "error" ? "Fejl" : "Afventer synkronisering";
+  }
+
+  async function postIgnore(path, body) {
+    try {
+      await call(path + "?on_conflict=id", {
+        method: "POST",
+        prefer: "resolution=ignore-duplicates,return=minimal",
+        body: body
+      });
+    } catch (err) {
+      if (err.status !== 409) throw err;
+    }
+  }
+
+  async function removeRow(table, id) {
+    try {
+      await call("/rest/v1/" + table + "?id=eq." + encodeURIComponent(id), { method: "DELETE", prefer: "return=minimal" });
+    } catch (err) {
+      if (err.status !== 404) throw err;
+    }
+  }
+
+  async function sendOp(op) {
+    op.status = "sending";
+    op.attempts += 1;
+    await remember(op);
+    try {
+      if (op.kind === "visit") {
+        await call("/rest/v1/exhibitors?id=eq." + encodeURIComponent(op.companyId), {
+          method: "PATCH",
+          prefer: "return=minimal",
+          body: op.body
+        });
+      } else if (op.kind === "note") {
+        await postIgnore("/rest/v1/notes", op.body);
+      } else if (op.kind === "contact") {
+        await postIgnore("/rest/v1/contacts", op.body);
+      } else if (op.kind === "followup") {
+        await postIgnore("/rest/v1/followups", op.body);
+      } else if (op.kind === "photo_delete") {
+        await removeRow("images", op.body.id);
+        await deleteObject(op.body.key);
+      } else if (op.kind === "voice_delete") {
+        await removeRow("voice_notes", op.body.id);
+        await deleteObject(op.body.key);
+      } else if (op.kind === "photo" || op.kind === "voice") {
+        await sendFile(op);
+        return;
+      }
+      await forget(op.id);
+    } catch (err) {
+      if (err.status === 409) {
+        await forget(op.id);
+        return;
+      }
+      await hold(op, err);
+    }
+  }
+
+  async function sendFile(op) {
+    var blob = await idbGet("files", op.id);
+    if (!blob) {
+      op.status = "error";
+      op.error = "Filen mangler på telefonen.";
+      await remember(op);
+      return;
+    }
+    var key = op.body.storage_key || op.body.audio_key;
+    if (op.kind === "photo") await putPhoto(key, blob);
+    else await putVoice(key, blob);
+    op.uploaded = true;
+    await remember(op);
+    if (op.cancel) {
+      await deleteObject(key);
+      await removeRow(op.kind === "photo" ? "images" : "voice_notes", op.id);
+      await forget(op.id);
+      return;
+    }
+    var table = op.kind === "photo" ? "/rest/v1/images" : "/rest/v1/voice_notes";
+    await postIgnore(table, op.body);
+    await forget(op.id);
+  }
+
+  async function hold(op, err) {
+    var rejected = err.status && err.status !== 401 && err.status !== 408 && err.status !== 429 && err.status < 500;
+    op.status = rejected ? "error" : "pending";
+    op.error = rejected ? "Fejl" : "";
+    await remember(op);
+    if (!rejected) throw err;
+  }
+
+  function nextText() {
+    var sendingVisit = {};
+    mine().forEach(function (item) {
+      if (item.kind === "visit" && item.status === "sending") sendingVisit[item.companyId] = true;
+    });
+    var text = mine().filter(function (item) {
+      return item.status === "pending" && item.kind !== "photo" && item.kind !== "voice";
+    }).sort(function (a, b) { return a.createdAt < b.createdAt ? -1 : 1; });
+    for (var i = 0; i < text.length; i += 1) {
+      if (text[i].kind === "visit" && sendingVisit[text[i].companyId]) continue;
+      return text[i];
+    }
+    return null;
+  }
+
+  function nextFile() {
+    var files = mine().filter(function (item) {
+      return item.status === "pending" && (item.kind === "photo" || item.kind === "voice");
+    }).sort(function (a, b) { return a.createdAt < b.createdAt ? -1 : 1; });
+    return files[0] || null;
+  }
+
+  async function flush() {
+    if (state.syncing) {
+      state.flushAgain = true;
+      return;
+    }
+    if (!mine().length) {
+      paintSync();
+      return;
+    }
+    state.syncing = true;
+    paintSync();
+    try {
+      await ensureSession();
+      state.syncAuth = false;
+      if (reopenMedia() && (state.page === "capture" || state.page === "profile")) render();
+      var guard = 0;
+      var sentFile = false;
+      while (guard < 80) {
+        guard += 1;
+        var text = nextText();
+        if (text) {
+          await sendOp(text);
+          continue;
+        }
+        var file = nextFile();
+        if (!file) break;
+        await sendOp(file);
+        sentFile = true;
+      }
+    } catch (err) {
+      if (err && err.status === 401) state.syncAuth = true;
+    }
+    state.syncing = false;
+    if (sentFile && (state.page === "capture" || state.page === "profile")) render();
+    else paintSync();
+    if (state.flushAgain) {
+      state.flushAgain = false;
+      flush();
+    }
+  }
+
+  function syncNow() {
+    mine().forEach(function (item) {
+      if (item.status === "error") item.status = "pending";
+    });
+    Promise.all(mine().filter(function (item) { return item.status === "pending"; }).map(function (item) {
+      return remember(item);
+    })).then(flush, flush);
+  }
+
+  async function queuedMedia(companyId, kind) {
+    var ops = mine(companyId).filter(function (item) { return item.kind === kind; });
+    var ready = [];
+    for (var i = 0; i < ops.length; i += 1) {
+      var blob = null;
+      try { blob = await idbGet("files", ops[i].id); } catch (err) { blob = null; }
+      ready.push({ body: ops[i].body, url: blob ? URL.createObjectURL(blob) : "" });
+    }
+    return ready;
+  }
+
+  async function dropOrQueue(kind, companyId, item, key) {
+    var live = state.outbox.filter(function (op) { return op.id === item.id; })[0];
+    if (live && (live.kind === "photo" || live.kind === "voice")) {
+      if (live.status === "sending") {
+        live.cancel = true;
+        await remember(live);
+        return;
+      }
+      await forget(live.id);
+      return;
+    }
+    var deleteId = item.id + ":delete";
+    if (state.outbox.some(function (op) { return op.id === deleteId; })) return;
+    await remember({
+      id: deleteId,
+      userId: userId(),
+      companyId: companyId,
+      kind: kind,
+      body: { id: item.id, key: key },
+      status: "pending",
+      attempts: 0,
+      error: "",
+      createdAt: new Date().toISOString(),
+      cancel: false,
+      uploaded: false
+    });
+  }
+
   async function call(path, options) {
     options = options || {};
     var token = options.token || (state.session && state.session.access_token) || cfg.key;
@@ -183,13 +649,19 @@
     var session = state.session;
     if (!session) return false;
     if (session.expires_at && Date.now() < session.expires_at - 60000) return true;
-    var data = await call("/auth/v1/token?grant_type=refresh_token", {
-      method: "POST",
-      token: cfg.key,
-      body: { refresh_token: session.refresh_token }
-    });
-    saveSession(storeToken(data));
-    return true;
+    try {
+      var data = await call("/auth/v1/token?grant_type=refresh_token", {
+        method: "POST",
+        token: cfg.key,
+        body: { refresh_token: session.refresh_token }
+      });
+      saveSession(storeToken(data));
+      state.syncAuth = false;
+      return true;
+    } catch (err) {
+      if (err.status === 401) state.syncAuth = true;
+      throw err;
+    }
   }
 
   function storeToken(data) {
@@ -428,19 +900,56 @@
   }
 
   async function boot() {
-    state.busy = true;
     state.error = "";
-    render();
+    try {
+      await openDb();
+      state.outbox = await idbAll("outbox");
+      var revived = false;
+      state.outbox.forEach(function (item) {
+        if (item.status !== "sending") return;
+        item.status = "pending";
+        revived = true;
+      });
+      if (revived) await Promise.all(state.outbox.map(function (item) { return remember(item); }));
+      var cached = await idbGet("fair", userId());
+      if (cached && cached.rows && cached.rows.length) {
+        state.eventId = cached.eventId || "";
+        state.rows = cached.rows.map(attach);
+        applyOverlay();
+        state.busy = false;
+        render();
+      }
+    } catch (err) {
+      state.outbox = state.outbox || [];
+    }
+    if (!state.rows.length) {
+      state.busy = true;
+      render();
+    }
     try {
       await ensureSession();
-      var events = await call("/rest/v1/events?select=id,name&order=year.desc");
-      state.eventId = events.length ? events[0].id : "";
+      if (!state.eventId) {
+        var events = await call("/rest/v1/events?select=id,name&order=year.desc");
+        state.eventId = events.length ? events[0].id : "";
+      }
       await loadRows();
     } catch (err) {
-      if (err.status === 401) saveSession(null);
-      state.error = "Dagen kunne ikke hentes.";
       state.busy = false;
-      render();
+      if (!state.rows.length) {
+        if (err.status === 401) saveSession(null);
+        state.error = "Dagen kunne ikke hentes. Åbn appen én gang med net, før messen.";
+        render();
+      } else if (err.status === 401) {
+        state.syncAuth = true;
+        render();
+      }
+    }
+    if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(function () {});
+    flush();
+    if (!state.syncTimer) {
+      state.syncTimer = setInterval(function () {
+        if (mine().some(function (item) { return item.status === "pending"; })) flush();
+      }, 30000);
     }
   }
 
@@ -450,8 +959,11 @@
       + "&event_id=eq." + encodeURIComponent(state.eventId)
       + "&limit=1000";
     state.rows = (await call(query)).map(attach);
+    applyOverlay();
+    reopenMedia();
     state.busy = false;
     render();
+    saveFair();
   }
 
   function renderHome() {
@@ -461,6 +973,7 @@
       el("p", { class: "eyebrow" }, [state.here ? "Du er ved " + state.here.name : "Du er ikke startet"])
     ]));
     root.appendChild(el("h1", null, [greeting() + ", Michell."]));
+    root.appendChild(syncLine(""));
     var hot = todayCount("hot");
     var marked = todayCount("interesting");
     var maybe = todayCount("maybe");
@@ -605,16 +1118,15 @@
 
   async function setPlan(row, planName) {
     state.error = "";
+    var previous = row.visit_plan;
     try {
-      await call("/rest/v1/exhibitors?id=eq." + encodeURIComponent(row.id), {
-        method: "PATCH",
-        prefer: "return=minimal",
-        body: { visit_plan: planName, updated_at: new Date().toISOString() }
-      });
+      await enqueueVisit(row.id, { visit_plan: planName, updated_at: new Date().toISOString() });
       row.visit_plan = planName;
       render();
+      flush();
     } catch (err) {
-      state.error = "Status kunne ikke gemmes.";
+      row.visit_plan = previous;
+      state.error = keepMessage(err) || "Status kunne ikke gemmes.";
       render();
     }
   }
@@ -673,17 +1185,16 @@
 
   async function mark(row, planName) {
     state.error = "";
+    var previous = row.visit_plan;
     try {
-      await call("/rest/v1/exhibitors?id=eq." + encodeURIComponent(row.id), {
-        method: "PATCH",
-        prefer: "return=minimal",
-        body: { visit_plan: planName, updated_at: new Date().toISOString() }
-      });
+      await enqueueVisit(row.id, { visit_plan: planName, updated_at: new Date().toISOString() });
       row.visit_plan = planName;
       saveHere(row);
       advance();
+      flush();
     } catch (err) {
-      state.error = "Status kunne ikke gemmes.";
+      row.visit_plan = previous;
+      state.error = keepMessage(err) || "Status kunne ikke gemmes.";
       render();
     }
   }
@@ -708,6 +1219,8 @@
       el("button", { class: "link", type: "button", onclick: function () { state.page = "mission"; render(); } }, ["Tilbage"])
     ]));
     root.appendChild(el("h1", null, [row.name]));
+    var waiting = syncLine(row.id);
+    if (waiting) root.appendChild(waiting);
     root.appendChild(el("p", { class: "ai" }, [
       profileLine(row),
       el("button", {
@@ -744,7 +1257,7 @@
     renderVoices(row.id);
     if (state.error) root.appendChild(el("p", { class: "error" }, [state.error]));
     root.appendChild(el("div", { class: "dock" }, [
-      el("button", { class: "action", type: "button", onclick: saveCapture }, [state.busy ? "Gemmer…" : "Gem og gå videre"])
+      el("button", { class: "action", type: "button", onclick: saveCapture }, [state.saving ? "Gemmer…" : "Gem og gå videre"])
     ]));
   }
 
@@ -816,14 +1329,18 @@
     }
     root.appendChild(el("div", { class: "photos" }, slot.items.map(function (item) {
       var selected = slot.selected === item.id;
-      return el("button", {
-        class: "thumb" + (selected ? " on" : ""),
-        type: "button",
-        onclick: function () {
-          slot.selected = selected ? "" : item.id;
-          render();
-        }
-      }, [el("img", { src: slot.urls[item.id] || "", alt: "Billede" })]);
+      var label = mediaLabel(item.id);
+      return el("div", { class: "shot" }, [
+        el("button", {
+          class: "thumb" + (selected ? " on" : ""),
+          type: "button",
+          onclick: function () {
+            slot.selected = selected ? "" : item.id;
+            render();
+          }
+        }, [el("img", { src: slot.urls[item.id] || "", alt: "Billede" })]),
+        label ? el("span", { class: label === "Fejl" ? "error media-state" : "quiet media-state" }, [label]) : null
+      ]);
     })));
     if (slot.selected) {
       root.appendChild(el("button", {
@@ -834,6 +1351,19 @@
     }
   }
 
+  function reopenMedia() {
+    var changed = false;
+    ["photos", "voices"].forEach(function (bucket) {
+      Object.keys(state[bucket]).forEach(function (id) {
+        var slot = state[bucket][id];
+        if (!slot || (slot.status !== "deferred" && slot.status !== "error")) return;
+        delete state[bucket][id];
+        changed = true;
+      });
+    });
+    return changed;
+  }
+
   function ensurePhotos(exhibitorId) {
     var slot = state.photos[exhibitorId];
     if (slot && slot.status) return;
@@ -842,17 +1372,32 @@
   }
 
   async function loadPhotos(exhibitorId) {
+    var selected = state.photos[exhibitorId] && state.photos[exhibitorId].selected;
+    var server = null;
     try {
-      var items = await call("/rest/v1/images?select=id,storage_key,created_at&company_id=eq." + encodeURIComponent(exhibitorId) + "&order=created_at.desc");
-      var urls = {};
-      await Promise.all(items.map(async function (item) {
-        urls[item.id] = await fetchPhotoUrl(item.storage_key);
-      }));
-      var selected = state.photos[exhibitorId] && state.photos[exhibitorId].selected;
-      state.photos[exhibitorId] = { status: "ready", items: items, urls: urls, selected: selected || "" };
+      server = await call("/rest/v1/images?select=id,storage_key,created_at&company_id=eq." + encodeURIComponent(exhibitorId) + "&order=created_at.desc");
     } catch (err) {
-      state.photos[exhibitorId] = { status: "error", items: [], urls: {}, selected: "" };
+      server = null;
     }
+    var local = await queuedMedia(exhibitorId, "photo");
+    if (!server && !local.length) {
+      state.photos[exhibitorId] = { status: "deferred", items: [], urls: {}, selected: "" };
+      render();
+      return;
+    }
+    var items = (server || []).slice();
+    var urls = {};
+    await Promise.all(items.map(async function (item) {
+      try { urls[item.id] = await fetchPhotoUrl(item.storage_key); }
+      catch (err) { urls[item.id] = ""; }
+    }));
+    local.forEach(function (entry) {
+      if (items.some(function (item) { return item.id === entry.body.id; })) return;
+      items.unshift(entry.body);
+      urls[entry.body.id] = entry.url;
+    });
+    items.sort(function (a, b) { return a.created_at < b.created_at ? 1 : -1; });
+    state.photos[exhibitorId] = { status: "ready", items: items, urls: urls, selected: selected || "" };
     render();
   }
 
@@ -914,7 +1459,11 @@
       headers: Object.assign(authHeaders(), { "Content-Type": "image/jpeg", "x-upsert": "true" }),
       body: blob
     });
-    if (!response.ok) throw new Error("upload");
+    if (!response.ok) {
+      var error = new Error("upload");
+      error.status = response.status;
+      throw error;
+    }
   }
 
   async function deleteObject(key) {
@@ -922,7 +1471,11 @@
       method: "DELETE",
       headers: authHeaders()
     });
-    if (!response.ok && response.status !== 404) throw new Error("delete");
+    if (!response.ok && response.status !== 404) {
+      var error = new Error("delete");
+      error.status = response.status;
+      throw error;
+    }
   }
 
   async function takePhoto(exhibitorId, input) {
@@ -932,18 +1485,18 @@
     state.photoBusy = true;
     state.photoError = "";
     render();
-    var key = "";
     try {
       var blob = await preparePhoto(file);
       var id = crypto.randomUUID();
-      key = "images/" + exhibitorId + "/" + id + ".jpg";
+      var key = "images/" + exhibitorId + "/" + id + ".jpg";
       var when = new Date().toISOString();
-      await putPhoto(key, blob);
-      await call("/rest/v1/images", {
-        method: "POST",
-        prefer: "return=minimal",
-        body: { id: id, company_id: exhibitorId, storage_key: key, category: "other", created_at: when }
-      });
+      await enqueueFile(exhibitorId, "photo", {
+        id: id,
+        company_id: exhibitorId,
+        storage_key: key,
+        category: "other",
+        created_at: when
+      }, blob, "image/jpeg");
       var slot = state.photos[exhibitorId] || { status: "ready", items: [], urls: {}, selected: "" };
       slot.status = "ready";
       slot.items = [{ id: id, storage_key: key, created_at: when }].concat(slot.items || []);
@@ -951,12 +1504,10 @@
       state.photos[exhibitorId] = slot;
       state.photoBusy = false;
       render();
+      flush();
     } catch (err) {
-      if (key) {
-        try { await deleteObject(key); } catch (ignore) { /* rækken blev ikke oprettet */ }
-      }
       state.photoBusy = false;
-      state.photoError = "Billedet blev ikke gemt. Prøv igen.";
+      state.photoError = keepMessage(err) || "Billedet blev ikke gemt. Prøv igen.";
       render();
     }
   }
@@ -966,17 +1517,21 @@
     if (!slot) return;
     var item = slot.items.filter(function (row) { return row.id === imageId; })[0];
     if (!item) return;
+    var previous = slot.items.slice();
+    var selected = slot.selected;
     state.photoError = "";
+    if (slot.urls[imageId]) URL.revokeObjectURL(slot.urls[imageId]);
+    delete slot.urls[imageId];
+    slot.items = slot.items.filter(function (row) { return row.id !== imageId; });
+    slot.selected = "";
+    render();
     try {
-      await deleteObject(item.storage_key);
-      await call("/rest/v1/images?id=eq." + encodeURIComponent(imageId), { method: "DELETE", prefer: "return=minimal" });
-      if (slot.urls[imageId]) URL.revokeObjectURL(slot.urls[imageId]);
-      delete slot.urls[imageId];
-      slot.items = slot.items.filter(function (row) { return row.id !== imageId; });
-      slot.selected = "";
-      render();
+      await dropOrQueue("photo_delete", exhibitorId, item, item.storage_key);
+      flush();
     } catch (err) {
-      state.photoError = "Billedet kunne ikke slettes.";
+      slot.items = previous;
+      slot.selected = selected;
+      state.photoError = keepMessage(err) || "Billedet kunne ikke slettes.";
       render();
     }
   }
@@ -1043,6 +1598,7 @@
     slot.items.forEach(function (item) {
       var selected = slot.selected === item.id;
       var playing = state.playingId === item.id;
+      var label = mediaLabel(item.id);
       root.appendChild(el("div", { class: "voicenote" }, [
         el("button", {
           class: "choice" + (playing ? " on" : ""),
@@ -1056,7 +1612,8 @@
             slot.selected = selected ? "" : item.id;
             render();
           }
-        }, [clock(item.duration_sec)])
+        }, [clock(item.duration_sec)]),
+        label ? el("span", { class: label === "Fejl" ? "error media-state" : "quiet media-state" }, [label]) : null
       ]));
     });
     if (slot.selected) {
@@ -1076,22 +1633,35 @@
   }
 
   async function loadVoices(exhibitorId) {
+    var previous = state.voices[exhibitorId] || {};
+    var server = null;
     try {
-      var items = await call("/rest/v1/voice_notes?select=id,audio_key,duration_sec,created_at&company_id=eq." + encodeURIComponent(exhibitorId) + "&order=created_at.desc");
-      var urls = {};
-      await Promise.all(items.map(async function (item) {
-        urls[item.id] = await fetchVoiceUrl(item.audio_key);
-      }));
-      var previous = state.voices[exhibitorId] || {};
-      state.voices[exhibitorId] = {
-        status: "ready",
-        items: items,
-        urls: urls,
-        selected: previous.selected || ""
-      };
+      server = await call("/rest/v1/voice_notes?select=id,audio_key,duration_sec,created_at&company_id=eq." + encodeURIComponent(exhibitorId) + "&order=created_at.desc");
     } catch (err) {
-      state.voices[exhibitorId] = { status: "error", items: [], urls: {}, selected: "" };
+      server = null;
     }
+    var local = await queuedMedia(exhibitorId, "voice");
+    if (!server && !local.length) {
+      state.voices[exhibitorId] = { status: "deferred", items: [], urls: {}, selected: "" };
+      render();
+      return;
+    }
+    var items = (server || []).slice();
+    var urls = {};
+    await Promise.all(items.map(async function (item) {
+      try { urls[item.id] = await fetchVoiceUrl(item.audio_key); }
+      catch (err) { urls[item.id] = previous.urls && previous.urls[item.id] || ""; }
+    }));
+    local.forEach(function (entry) {
+      if (items.some(function (item) { return item.id === entry.body.id; })) {
+        if (entry.url) urls[entry.body.id] = entry.url;
+        return;
+      }
+      items.unshift(entry.body);
+      urls[entry.body.id] = entry.url;
+    });
+    items.sort(function (a, b) { return a.created_at < b.created_at ? 1 : -1; });
+    state.voices[exhibitorId] = { status: "ready", items: items, urls: urls, selected: previous.selected || "" };
     render();
   }
 
@@ -1261,44 +1831,41 @@
       headers: Object.assign(authHeaders(), { "Content-Type": type, "x-upsert": "true" }),
       body: blob
     });
-    if (!response.ok) throw new Error("upload");
+    if (!response.ok) {
+      var error = new Error("upload");
+      error.status = response.status;
+      throw error;
+    }
   }
 
   async function storeVoice(exhibitorId, blob, seconds) {
     state.voiceBusy = true;
     state.voiceError = "";
     render();
-    var key = "";
     try {
       var id = crypto.randomUUID();
-      key = "voice/" + exhibitorId + "/" + id + "." + voiceSuffix(blob.type);
+      var key = "voice/" + exhibitorId + "/" + id + "." + voiceSuffix(blob.type);
       var when = new Date().toISOString();
-      await putVoice(key, blob);
-      await call("/rest/v1/voice_notes", {
-        method: "POST",
-        prefer: "return=minimal",
-        body: {
-          id: id,
-          company_id: exhibitorId,
-          audio_key: key,
-          transcript: "",
-          duration_sec: Math.round(seconds * 10) / 10,
-          created_at: when
-        }
-      });
+      var duration = Math.round(seconds * 10) / 10;
+      await enqueueFile(exhibitorId, "voice", {
+        id: id,
+        company_id: exhibitorId,
+        audio_key: key,
+        transcript: "",
+        duration_sec: duration,
+        created_at: when
+      }, blob, blob.type || "audio/mp4");
       var slot = state.voices[exhibitorId] || { status: "ready", items: [], urls: {}, selected: "" };
       slot.status = "ready";
-      slot.items = [{ id: id, audio_key: key, duration_sec: Math.round(seconds * 10) / 10, created_at: when }].concat(slot.items || []);
+      slot.items = [{ id: id, audio_key: key, duration_sec: duration, created_at: when }].concat(slot.items || []);
       slot.urls[id] = URL.createObjectURL(blob);
       state.voices[exhibitorId] = slot;
       state.voiceBusy = false;
       render();
+      flush();
     } catch (err) {
-      if (key) {
-        try { await deleteObject(key); } catch (ignore) { /* rækken blev ikke oprettet */ }
-      }
       state.voiceBusy = false;
-      state.voiceError = "Stemmenoten blev ikke gemt. Prøv igen.";
+      state.voiceError = keepMessage(err) || "Stemmenoten blev ikke gemt. Prøv igen.";
       render();
     }
   }
@@ -1334,21 +1901,25 @@
     if (!slot) return;
     var item = slot.items.filter(function (row) { return row.id === voiceId; })[0];
     if (!item) return;
+    var previous = slot.items.slice();
+    var selected = slot.selected;
     state.voiceError = "";
     if (state.playingId === voiceId) {
       player.pause();
       state.playingId = "";
     }
+    if (slot.urls[voiceId]) URL.revokeObjectURL(slot.urls[voiceId]);
+    delete slot.urls[voiceId];
+    slot.items = slot.items.filter(function (row) { return row.id !== voiceId; });
+    slot.selected = "";
+    render();
     try {
-      await deleteObject(item.audio_key);
-      await call("/rest/v1/voice_notes?id=eq." + encodeURIComponent(voiceId), { method: "DELETE", prefer: "return=minimal" });
-      if (slot.urls[voiceId]) URL.revokeObjectURL(slot.urls[voiceId]);
-      delete slot.urls[voiceId];
-      slot.items = slot.items.filter(function (row) { return row.id !== voiceId; });
-      slot.selected = "";
-      render();
+      await dropOrQueue("voice_delete", exhibitorId, item, item.audio_key);
+      flush();
     } catch (err) {
-      state.voiceError = "Stemmenoten kunne ikke slettes.";
+      slot.items = previous;
+      slot.selected = selected;
+      state.voiceError = keepMessage(err) || "Stemmenoten kunne ikke slettes.";
       render();
     }
   }
@@ -1373,73 +1944,116 @@
       render();
       return;
     }
-    state.busy = true;
+    if (state.saving) return;
+    state.saving = true;
     state.error = "";
     render();
     var when = new Date().toISOString();
     var action = form.action && form.action !== "none" ? actions[form.action] : "";
+    var visit = {
+      visit_plan: form.action === "again" ? "return_later" : "visited",
+      relevance: form.result,
+      next_step: action,
+      summary: form.notes.trim(),
+      sales_opportunity: form.level || "",
+      visited_at: when,
+      updated_at: when
+    };
+    var ops = [];
+    var pending = mine(row.id).filter(function (item) {
+      return item.kind === "visit" && item.status !== "sending";
+    })[0];
+    var previousBody = pending ? Object.assign({}, pending.body) : null;
+    if (pending) {
+      pending.body = Object.assign({}, pending.body, visit);
+      pending.status = "pending";
+      pending.error = "";
+      pending.createdAt = when;
+      ops.push(pending);
+    } else {
+      ops.push({
+        id: crypto.randomUUID(),
+        userId: userId(),
+        companyId: row.id,
+        kind: "visit",
+        body: visit,
+        status: "pending",
+        attempts: 0,
+        error: "",
+        createdAt: when,
+        cancel: false,
+        uploaded: false
+      });
+    }
+    if (form.name.trim()) {
+      ops.push({
+        id: crypto.randomUUID(),
+        userId: userId(),
+        companyId: row.id,
+        kind: "contact",
+        body: {
+          id: "",
+          company_id: row.id,
+          name: form.name.trim(),
+          title: form.title.trim(),
+          email: form.email.trim(),
+          phone: form.phone.trim(),
+          source: "fair",
+          created_at: when
+        },
+        status: "pending",
+        attempts: 0,
+        error: "",
+        createdAt: when,
+        cancel: false,
+        uploaded: false
+      });
+      ops[ops.length - 1].body.id = ops[ops.length - 1].id;
+    }
+    if (form.notes.trim()) {
+      ops.push({
+        id: crypto.randomUUID(),
+        userId: userId(),
+        companyId: row.id,
+        kind: "note",
+        body: { id: "", company_id: row.id, body: form.notes.trim(), created_at: when },
+        status: "pending",
+        attempts: 0,
+        error: "",
+        createdAt: when,
+        cancel: false,
+        uploaded: false
+      });
+      ops[ops.length - 1].body.id = ops[ops.length - 1].id;
+    }
+    if (action) {
+      ops.push({
+        id: crypto.randomUUID(),
+        userId: userId(),
+        companyId: row.id,
+        kind: "followup",
+        body: { id: "", company_id: row.id, title: action, source: "fair", created_at: when },
+        status: "pending",
+        attempts: 0,
+        error: "",
+        createdAt: when,
+        cancel: false,
+        uploaded: false
+      });
+      ops[ops.length - 1].body.id = ops[ops.length - 1].id;
+    }
     try {
-      if (!form.exhibitorSaved) {
-        await call("/rest/v1/exhibitors?id=eq." + encodeURIComponent(row.id), {
-          method: "PATCH",
-          prefer: "return=minimal",
-          body: {
-            visit_plan: form.action === "again" ? "return_later" : "visited",
-            relevance: form.result,
-            next_step: action,
-            summary: form.notes.trim(),
-            sales_opportunity: form.level || "",
-            visited_at: when,
-            updated_at: when
-          }
-        });
-        form.exhibitorSaved = true;
-      }
-      if (form.name.trim() && !form.contactSaved) {
-        await call("/rest/v1/contacts", {
-          method: "POST",
-          prefer: "return=minimal",
-          body: {
-            id: crypto.randomUUID(),
-            company_id: row.id,
-            name: form.name.trim(),
-            title: form.title.trim(),
-            email: form.email.trim(),
-            phone: form.phone.trim(),
-            source: "fair",
-            created_at: when
-          }
-        });
-        form.contactSaved = true;
-      }
-      if (form.notes.trim() && !form.noteSaved) {
-        await call("/rest/v1/notes", {
-          method: "POST",
-          prefer: "return=minimal",
-          body: { id: crypto.randomUUID(), company_id: row.id, body: form.notes.trim(), created_at: when }
-        });
-        form.noteSaved = true;
-      }
-      if (action && !form.followSaved) {
-        await call("/rest/v1/followups", {
-          method: "POST",
-          prefer: "return=minimal",
-          body: { id: crypto.randomUUID(), company_id: row.id, title: action, source: "fair", created_at: when }
-        });
-        form.followSaved = true;
-      }
-      row.visit_plan = form.action === "again" ? "return_later" : "visited";
-      row.relevance = form.result;
-      row.next_step = action;
-      row.summary = form.notes.trim();
-      row.sales_opportunity = form.level || "";
+      await rememberAll(ops);
+      Object.assign(row, visit);
       saveHere(row);
       state.savedName = shortCompany(row.name);
-      state.busy = false;
+      state.saving = false;
       advance();
+      flush();
     } catch (err) {
-      state.busy = false;
-      state.error = "Samtalen kunne ikke gemmes. Prøv igen, før du går videre.";
+      if (pending && previousBody) pending.body = previousBody;
+      state.saving = false;
+      state.error = keepMessage(err) || "Samtalen kunne ikke gemmes. Prøv igen, før du går videre.";
       render();
     }
   }
@@ -1645,7 +2259,12 @@
       state.profile = rows[0] || null;
       if (!state.profile) state.error = "Profilen blev ikke fundet.";
     } catch (err) {
-      state.error = "Profilen kunne ikke hentes.";
+      var known = exhibitorRow(companyId);
+      if (known) {
+        state.profile = Object.assign({ id: known.company_id || companyId, name: known.name }, known.profile || {});
+      } else {
+        state.error = "Profilen kunne ikke hentes.";
+      }
     }
     state.busy = false;
     render();
@@ -1660,6 +2279,11 @@
     ]));
     var role = businessRole(profile);
     root.appendChild(el("h1", { class: "voice" }, [profile.name || "Virksomhed"]));
+    var exhibitorSync = exhibitorRow(profile.id);
+    if (exhibitorSync) {
+      var companySync = syncLine(exhibitorSync.id);
+      if (companySync) root.appendChild(companySync);
+    }
     root.appendChild(el("div", { class: "badges" }, [
       role ? el("span", { class: "pill outline" }, [role]) : null,
       el("span", { class: badgeClass(profile.customer_type) }, [typeLabels[profile.customer_type] || "Ikke afklaret"]),
@@ -1824,8 +2448,10 @@
   };
 
   window.addEventListener("pagehide", function () { finishRecording(true); });
+  window.addEventListener("online", function () { flush(); });
   document.addEventListener("visibilitychange", function () {
     if (document.visibilityState === "hidden") finishRecording(true);
+    else flush();
   });
 
   state.session = loadSession();

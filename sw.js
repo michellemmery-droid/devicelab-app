@@ -1,10 +1,10 @@
-var CACHE = "devicelab-shell-13";
+var CACHE = "devicelab-shell-14";
 var SHELL = [
   "./",
   "./index.html",
-  "./app.css?v=13",
-  "./app.js?v=13",
-  "./config.js?v=13",
+  "./app.css?v=14",
+  "./app.js?v=14",
+  "./config.js?v=14",
   "./manifest.json",
   "./icon-180.png",
   "./icon-192.png",
