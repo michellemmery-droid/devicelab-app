@@ -1226,12 +1226,20 @@
     });
   }
 
+  function homeReadyLabel(report) {
+    if (report.ready) return "✅ Klar til messen";
+    var missing = [report.synced, report.offline, report.hallsOk, report.queueClear].filter(function (ok) {
+      return !ok;
+    }).length;
+    return "⚠️ " + missing + " ting mangler";
+  }
+
   function paintHomeReady() {
     var node = document.getElementById("home-ready");
     if (!node) return;
-    var ready = readyReport().ready;
-    node.textContent = ready ? "Klar til messen" : "Messeklar";
-    node.className = ready ? "readyline" : "choice slim";
+    var report = readyReport();
+    node.textContent = homeReadyLabel(report);
+    node.className = "readyline" + (report.ready ? "" : " warn");
   }
 
   function renderReady() {
@@ -1286,14 +1294,15 @@
     root.appendChild(el("div", { class: "top" }, [
       el("p", { class: "eyebrow" }, [state.here ? "Du er ved " + state.here.name : "Du er ikke startet"])
     ]));
+    var morning = readyReport();
     root.appendChild(el("h1", null, [greeting() + ", Michell."]));
-    root.appendChild(syncLine(""));
     root.appendChild(el("button", {
       id: "home-ready",
-      class: readyReport().ready ? "readyline" : "choice slim",
+      class: "readyline" + (morning.ready ? "" : " warn"),
       type: "button",
       onclick: function () { state.page = "ready"; state.messeDetail = false; render(); }
-    }, [readyReport().ready ? "Klar til messen" : "Messeklar"]));
+    }, [homeReadyLabel(morning)]));
+    root.appendChild(syncLine(""));
     if (!next) {
       root.appendChild(el("p", { class: "quiet" }, ["Der er ikke flere åbne stande i de interessante haller."]));
     } else {
@@ -3159,7 +3168,6 @@
   function renderNav() {
     var bar = el("nav", { class: "nav" }, [
       navButton("home", "Home"),
-      navButton("ready", "Messeklar"),
       navButton("research", "Research"),
       navButton("archive", "Arkiv"),
       navButton("after", "Efter")
