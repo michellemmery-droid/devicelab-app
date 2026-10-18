@@ -841,9 +841,23 @@
     var profile = row.companies || {};
     row.profile = profile;
     row.match_score = profile.match_score || 0;
+    row.relationship_status = profile.relationship_status || row.relationship_status || "new";
     row.visit_plan = row.visit_plan || "unset";
     row.relevance = row.relevance || "unset";
     return row;
+  }
+
+  function relationRank(row) {
+    var order = {
+      new: 0,
+      existing_contact: 1,
+      later: 2,
+      existing_partner: 3,
+      existing_customer: 4,
+      not_needed: 5
+    };
+    var code = (row.profile && row.profile.relationship_status) || row.relationship_status || "new";
+    return order[code] == null ? 0 : order[code];
   }
 
   function interesting(row) {
@@ -855,8 +869,10 @@
   }
 
   function byRoute(a, b) {
-    var later = (a.visit_plan === "return_later") - (b.visit_plan === "return_later");
-    return later || (b.match_score - a.match_score) || a.name.localeCompare(b.name, "da");
+    return missingRank(a) - missingRank(b)
+      || relationRank(a) - relationRank(b)
+      || (b.match_score - a.match_score)
+      || a.name.localeCompare(b.name, "da");
   }
 
   function plan() {
@@ -875,19 +891,8 @@
   }
 
   function bestHall(open) {
-    var best = "";
-    var score = -1;
-    var counts = {};
-    open.forEach(function (row) { counts[row.hall] = (counts[row.hall] || 0) + 1; });
-    open.forEach(function (row) {
-      var better = row.match_score > score;
-      var tie = row.match_score === score && (counts[row.hall] || 0) > (counts[best] || 0);
-      if (better || tie) {
-        best = row.hall;
-        score = row.match_score;
-      }
-    });
-    return best;
+    if (!open.length) return "";
+    return open.slice().sort(byRoute)[0].hall || "";
   }
 
   function hallLabel(hall) {
@@ -960,9 +965,7 @@
   function missingIn(hall) {
     return state.rows.filter(function (row) {
       return row.hall === hall && companyOpen(row);
-    }).sort(function (a, b) {
-      return missingRank(a) - missingRank(b) || (b.match_score - a.match_score) || a.name.localeCompare(b.name, "da");
-    });
+    }).sort(byRoute);
   }
 
   function standLabel(row) {
@@ -1124,7 +1127,7 @@
   }
 
   async function loadRows() {
-    var company = "companies(match_score,match_reason,conversation_topics,qualification_questions,customer_type,industry,biography,profile_updated_at)";
+    var company = "companies(match_score,match_reason,conversation_topics,qualification_questions,customer_type,industry,biography,profile_updated_at,relationship_status)";
     var base = "/rest/v1/exhibitors?select=id,company_id,name,hall,stand_number,relevance,visit_plan,next_step,summary,sales_opportunity,visited_at,";
     var filter = "&event_id=eq." + encodeURIComponent(state.eventId) + "&limit=1000";
     var rows;
@@ -2856,6 +2859,7 @@
     }
     var previous = profile.relationship_status || "new";
     profile.relationship_status = status;
+    applyRelation(profile.id, status);
     state.error = "";
     render();
     try {
@@ -2869,9 +2873,19 @@
       });
     } catch (err) {
       profile.relationship_status = previous;
+      applyRelation(profile.id, previous);
       state.error = "Relationen kunne ikke gemmes.";
       render();
     }
+  }
+
+  function applyRelation(companyId, status) {
+    state.rows.forEach(function (row) {
+      if (row.company_id !== companyId && row.id !== companyId) return;
+      row.relationship_status = status;
+      if (row.profile) row.profile.relationship_status = status;
+      if (row.companies) row.companies.relationship_status = status;
+    });
   }
 
   async function rerun(row) {
