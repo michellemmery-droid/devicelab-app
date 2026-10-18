@@ -107,6 +107,20 @@ h2 { font-size: 2rem; line-height: 1.05; }
   font-weight: 650;
 }
 .planbtn.on { background: var(--ink); color: #fbf6ee; border-color: var(--ink); }
+.file { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.photos { display: flex; gap: 8px; margin-top: 12px; overflow-x: auto; }
+.thumb {
+  flex: none;
+  width: 96px;
+  height: 96px;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: 16px;
+  overflow: hidden;
+  background: var(--card);
+}
+.thumb.on { border-color: var(--ink); }
+.thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
 
 .action, .choice, .field, .area {
   width: 100%;

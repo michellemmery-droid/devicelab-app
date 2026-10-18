@@ -24,8 +24,13 @@
     savedName: "",
     returnTo: "research",
     hall: "",
-    missionBack: ""
+    missionBack: "",
+    photos: {},
+    photoError: "",
+    photoBusy: false
   };
+  var PHOTO_MAX_SIDE = 3200;
+  var PHOTO_JPEG_QUALITY = 0.92;
 
   var outcomes = {
     not_interesting: "Ikke interessant",
@@ -649,6 +654,7 @@
     state.error = "";
     state.saved = "";
     state.savedName = "";
+    state.photoError = "";
     render();
   }
 
@@ -721,6 +727,7 @@
       root.appendChild(field("Email", "email", "email"));
       root.appendChild(field("Telefon", "phone", "tel"));
     }
+    renderPhotos(row.id);
     if (state.error) root.appendChild(el("p", { class: "error" }, [state.error]));
     root.appendChild(el("div", { class: "dock" }, [
       el("button", { class: "action", type: "button", onclick: saveCapture }, [state.busy ? "Gemmer…" : "Gem og gå videre"])
@@ -755,6 +762,209 @@
     var input = el("input", { class: "field", type: type, placeholder: label, value: state.form[key] });
     input.addEventListener("input", function () { state.form[key] = input.value; });
     return input;
+  }
+
+  function exhibitorRow(id) {
+    return state.rows.filter(function (item) {
+      return item.id === id || item.company_id === id;
+    })[0] || null;
+  }
+
+  function storagePath(key) {
+    return String(key || "").split("/").map(encodeURIComponent).join("/");
+  }
+
+  function renderPhotos(exhibitorId) {
+    if (!exhibitorId) return;
+    ensurePhotos(exhibitorId);
+    var camera = el("input", { class: "file", type: "file", accept: "image/*", capture: "environment" });
+    var library = el("input", { class: "file", type: "file", accept: "image/*" });
+    camera.addEventListener("change", function () { takePhoto(exhibitorId, camera); });
+    library.addEventListener("change", function () { takePhoto(exhibitorId, library); });
+    root.appendChild(el("p", { class: "kicker section" }, ["Billeder"]));
+    root.appendChild(camera);
+    root.appendChild(library);
+    root.appendChild(el("div", { class: "pair" }, [
+      el("button", { class: "choice", type: "button", onclick: function () { camera.click(); } }, ["Tag billede"]),
+      el("button", { class: "choice", type: "button", onclick: function () { library.click(); } }, ["Vælg fra telefon"])
+    ]));
+    if (state.photoBusy) root.appendChild(el("p", { class: "quiet" }, ["Gemmer billedet…"]));
+    if (state.photoError) root.appendChild(el("p", { class: "error" }, [state.photoError]));
+    var slot = state.photos[exhibitorId];
+    if (!slot || slot.status === "loading") return;
+    if (slot.status === "error") {
+      root.appendChild(el("p", { class: "error" }, ["Billederne kunne ikke hentes."]));
+      return;
+    }
+    if (!slot.items.length) {
+      root.appendChild(el("p", { class: "quiet" }, ["Ingen billeder endnu."]));
+      return;
+    }
+    root.appendChild(el("div", { class: "photos" }, slot.items.map(function (item) {
+      var selected = slot.selected === item.id;
+      return el("button", {
+        class: "thumb" + (selected ? " on" : ""),
+        type: "button",
+        onclick: function () {
+          slot.selected = selected ? "" : item.id;
+          render();
+        }
+      }, [el("img", { src: slot.urls[item.id] || "", alt: "Billede" })]);
+    })));
+    if (slot.selected) {
+      root.appendChild(el("button", {
+        class: "choice slim",
+        type: "button",
+        onclick: function () { removePhoto(exhibitorId, slot.selected); }
+      }, ["Slet"]));
+    }
+  }
+
+  function ensurePhotos(exhibitorId) {
+    var slot = state.photos[exhibitorId];
+    if (slot && slot.status) return;
+    state.photos[exhibitorId] = { status: "loading", items: [], urls: {}, selected: "" };
+    loadPhotos(exhibitorId);
+  }
+
+  async function loadPhotos(exhibitorId) {
+    try {
+      var items = await call("/rest/v1/images?select=id,storage_key,created_at&company_id=eq." + encodeURIComponent(exhibitorId) + "&order=created_at.desc");
+      var urls = {};
+      await Promise.all(items.map(async function (item) {
+        urls[item.id] = await fetchPhotoUrl(item.storage_key);
+      }));
+      var selected = state.photos[exhibitorId] && state.photos[exhibitorId].selected;
+      state.photos[exhibitorId] = { status: "ready", items: items, urls: urls, selected: selected || "" };
+    } catch (err) {
+      state.photos[exhibitorId] = { status: "error", items: [], urls: {}, selected: "" };
+    }
+    render();
+  }
+
+  async function fetchPhotoUrl(storageKey) {
+    var response = await fetch(cfg.url + "/storage/v1/object/authenticated/captures/" + storagePath(storageKey), {
+      headers: authHeaders()
+    });
+    if (!response.ok) throw new Error("photo");
+    return URL.createObjectURL(await response.blob());
+  }
+
+  function authHeaders() {
+    return {
+      apikey: cfg.key,
+      Authorization: "Bearer " + ((state.session && state.session.access_token) || cfg.key)
+    };
+  }
+
+  async function loadBitmap(file) {
+    if (window.createImageBitmap) {
+      try { return await createImageBitmap(file, { imageOrientation: "from-image" }); }
+      catch (err) { return await createImageBitmap(file); }
+    }
+    var url = URL.createObjectURL(file);
+    try {
+      var image = new Image();
+      image.src = url;
+      await image.decode();
+      return image;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  async function preparePhoto(file) {
+    var bitmap = await loadBitmap(file);
+    var width = bitmap.width || bitmap.naturalWidth;
+    var height = bitmap.height || bitmap.naturalHeight;
+    var longest = Math.max(width, height);
+    var jpeg = /jpe?g/i.test(file.type || "") || /\.jpe?g$/i.test(file.name || "");
+    if (jpeg && longest <= PHOTO_MAX_SIDE && file.size <= 3000000) {
+      if (bitmap.close) bitmap.close();
+      return file;
+    }
+    var scale = Math.min(1, PHOTO_MAX_SIDE / longest);
+    var canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
+    canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    if (bitmap.close) bitmap.close();
+    var blob = await new Promise(function (resolve) { canvas.toBlob(resolve, "image/jpeg", PHOTO_JPEG_QUALITY); });
+    if (!blob) throw new Error("empty");
+    return blob;
+  }
+
+  async function putPhoto(key, blob) {
+    var response = await fetch(cfg.url + "/storage/v1/object/captures/" + storagePath(key), {
+      method: "POST",
+      headers: Object.assign(authHeaders(), { "Content-Type": "image/jpeg", "x-upsert": "true" }),
+      body: blob
+    });
+    if (!response.ok) throw new Error("upload");
+  }
+
+  async function deleteObject(key) {
+    var response = await fetch(cfg.url + "/storage/v1/object/captures/" + storagePath(key), {
+      method: "DELETE",
+      headers: authHeaders()
+    });
+    if (!response.ok && response.status !== 404) throw new Error("delete");
+  }
+
+  async function takePhoto(exhibitorId, input) {
+    var file = input.files && input.files[0];
+    input.value = "";
+    if (!file || state.photoBusy) return;
+    state.photoBusy = true;
+    state.photoError = "";
+    render();
+    var key = "";
+    try {
+      var blob = await preparePhoto(file);
+      var id = crypto.randomUUID();
+      key = "images/" + exhibitorId + "/" + id + ".jpg";
+      var when = new Date().toISOString();
+      await putPhoto(key, blob);
+      await call("/rest/v1/images", {
+        method: "POST",
+        prefer: "return=minimal",
+        body: { id: id, company_id: exhibitorId, storage_key: key, category: "other", created_at: when }
+      });
+      var slot = state.photos[exhibitorId] || { status: "ready", items: [], urls: {}, selected: "" };
+      slot.status = "ready";
+      slot.items = [{ id: id, storage_key: key, created_at: when }].concat(slot.items || []);
+      slot.urls[id] = URL.createObjectURL(blob);
+      state.photos[exhibitorId] = slot;
+      state.photoBusy = false;
+      render();
+    } catch (err) {
+      if (key) {
+        try { await deleteObject(key); } catch (ignore) { /* rækken blev ikke oprettet */ }
+      }
+      state.photoBusy = false;
+      state.photoError = "Billedet blev ikke gemt. Prøv igen.";
+      render();
+    }
+  }
+
+  async function removePhoto(exhibitorId, imageId) {
+    var slot = state.photos[exhibitorId];
+    if (!slot) return;
+    var item = slot.items.filter(function (row) { return row.id === imageId; })[0];
+    if (!item) return;
+    state.photoError = "";
+    try {
+      await deleteObject(item.storage_key);
+      await call("/rest/v1/images?id=eq." + encodeURIComponent(imageId), { method: "DELETE", prefer: "return=minimal" });
+      if (slot.urls[imageId]) URL.revokeObjectURL(slot.urls[imageId]);
+      delete slot.urls[imageId];
+      slot.items = slot.items.filter(function (row) { return row.id !== imageId; });
+      slot.selected = "";
+      render();
+    } catch (err) {
+      state.photoError = "Billedet kunne ikke slettes.";
+      render();
+    }
   }
 
   function dictate() {
@@ -1039,6 +1249,7 @@
     state.notice = "";
     state.busy = true;
     state.profileToken = companyId;
+    state.photoError = "";
     state.profile = { id: companyId, name: "Henter…" };
     render();
     try {
@@ -1069,6 +1280,8 @@
       el("span", { class: "pill score" }, ["Score " + (profile.match_score || 0)]),
       profile.profile_confidence === "thin" ? el("span", { class: "pill low" }, ["Tyndt grundlag"]) : null
     ]));
+    var exhibitor = exhibitorRow(profile.id);
+    if (exhibitor) renderPhotos(exhibitor.id);
     if (state.busy) {
       root.appendChild(el("p", { class: "hint" }, ["Henter profilen…"]));
       return;
