@@ -48,7 +48,9 @@
     afterQuery: "",
     afterColdOpen: false,
     afterError: "",
-    afterNotice: ""
+    afterNotice: "",
+    dayFresh: false,
+    loadingDay: false
   };
   var PHOTO_MAX_SIDE = 3200;
   var PHOTO_JPEG_QUALITY = 0.92;
@@ -562,6 +564,8 @@
       }
       node.replaceWith(fresh);
     });
+    paintReady();
+    paintHomeReady();
   }
 
   function mediaLabel(id) {
@@ -1015,9 +1019,10 @@
     else if (state.page === "archive") renderArchive();
     else if (state.page === "research") renderResearch();
     else if (state.page === "after") renderAfter();
+    else if (state.page === "ready") renderReady();
     else if (state.page === "profile") renderProfile();
     else renderHome();
-    if (state.page === "home" || state.page === "hall" || state.page === "archive" || state.page === "research" || state.page === "after") renderNav();
+    if (state.page === "home" || state.page === "hall" || state.page === "archive" || state.page === "research" || state.page === "after" || state.page === "ready") renderNav();
   }
 
   function renderLogin() {
@@ -1085,6 +1090,7 @@
       state.busy = true;
       render();
     }
+    state.loadingDay = true;
     try {
       await ensureSession();
       if (!state.eventId) {
@@ -1105,6 +1111,7 @@
         render();
       }
     }
+    state.loadingDay = false;
     if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(function () {});
     flush();
     if (!state.syncTimer) {
@@ -1127,6 +1134,7 @@
     }
     state.rows = rows.map(attach);
     applyOverlay();
+    state.dayFresh = true;
     try {
       var pack = await Promise.all([
         call("/rest/v1/contacts?select=id,company_id,name,title,email,phone,created_at&limit=1000"),
@@ -1152,6 +1160,103 @@
     saveFair();
   }
 
+  function readyReport() {
+    var items = mine();
+    var failed = items.filter(function (item) { return item.status === "error"; });
+    var waiting = items.filter(function (item) { return item.status !== "error"; });
+    var halls = hallNames();
+    var queueClear = !items.length && !state.syncing;
+    var synced = !!state.dayFresh && !state.syncing && !state.syncAuth && !failed.length && !waiting.length;
+    var offline = state.rows.length > 0 && !!state.memoryLoaded;
+    var hallsOk = halls.length > 0;
+    return {
+      synced: synced,
+      offline: offline,
+      hallsOk: hallsOk,
+      queueClear: queueClear,
+      ready: synced && offline && hallsOk && queueClear,
+      halls: halls,
+      failed: failed,
+      waiting: waiting
+    };
+  }
+
+  function readyRows(report) {
+    var syncNote = "Forbindelsen er i orden.";
+    if (!report.synced) {
+      if (state.syncing) syncNote = "Synkroniserer.";
+      else if (state.syncAuth) syncNote = "Log ind for at sende det, der venter.";
+      else if (!state.dayFresh) syncNote = "Åbn appen med net, så dagen kan hentes.";
+      else syncNote = "Synkroniseringen er ikke færdig.";
+    }
+    var waitNote = "Der ligger intet og venter.";
+    if (!report.queueClear) {
+      var view = syncView("");
+      waitNote = view && view.text && view.text !== "Synkroniseret" ? view.text : "Der ligger noget og venter.";
+    }
+    return [
+      { ok: report.synced, label: "App synkroniseret", note: syncNote },
+      { ok: report.offline, label: "Offline data hentet", note: report.offline ? "Virksomhederne ligger på telefonen." : "Dagen ligger ikke på telefonen endnu." },
+      { ok: report.hallsOk, label: "Haller tilgængelige", note: report.hallsOk ? report.halls.length + " haller er klar." : "Hallerne er ikke hentet endnu." },
+      { ok: report.queueClear, label: "Ingen ventende synkronisering", note: waitNote },
+      { ok: report.ready, label: "Klar til messen", note: report.ready ? "Du kan gå ind." : "De andre linjer skal være grønne." }
+    ];
+  }
+
+  function checkRow(row) {
+    return el("div", { class: "check" + (row.ok ? " on" : "") }, [
+      el("span", { class: "mark", "aria-hidden": "true" }, [row.ok ? "✓" : ""]),
+      el("span", null, [
+        el("b", null, [row.label]),
+        el("span", null, [row.note])
+      ])
+    ]);
+  }
+
+  function paintReady() {
+    var list = document.getElementById("messe");
+    if (!list) return;
+    clear(list);
+    readyRows(readyReport()).forEach(function (row) {
+      list.appendChild(checkRow(row));
+    });
+  }
+
+  function paintHomeReady() {
+    var node = document.getElementById("home-ready");
+    if (!node) return;
+    var ready = readyReport().ready;
+    node.textContent = ready ? "Klar til messen" : "Messeklar";
+    node.className = "choice slim" + (ready ? " go" : "");
+  }
+
+  function renderReady() {
+    root.appendChild(el("p", { class: "eyebrow" }, ["Om morgenen"]));
+    root.appendChild(el("h1", null, ["Messeklar"]));
+    root.appendChild(el("div", { id: "messe" }));
+    paintReady();
+  }
+
+  async function refreshDay() {
+    if (state.loadingDay || state.dayFresh) return;
+    state.loadingDay = true;
+    try {
+      await ensureSession();
+      if (!state.eventId) {
+        var events = await call("/rest/v1/events?select=id,name&order=year.desc");
+        state.eventId = events.length ? events[0].id : "";
+      }
+      if (!state.eventId) throw new Error("event");
+      await loadRows();
+    } catch (err) {
+      if (!state.rows.length && state.page === "ready") {
+        state.error = "Dagen kunne ikke hentes. Åbn appen én gang med net, før messen.";
+        render();
+      }
+    }
+    state.loadingDay = false;
+  }
+
   function renderHome() {
     var day = plan();
     var next = day.next;
@@ -1160,6 +1265,12 @@
     ]));
     root.appendChild(el("h1", null, [greeting() + ", Michell."]));
     root.appendChild(syncLine(""));
+    root.appendChild(el("button", {
+      id: "home-ready",
+      class: "choice slim" + (readyReport().ready ? " go" : ""),
+      type: "button",
+      onclick: function () { state.page = "ready"; render(); }
+    }, [readyReport().ready ? "Klar til messen" : "Messeklar"]));
     var hot = todayCount("hot");
     var marked = todayCount("interesting");
     var maybe = todayCount("maybe");
@@ -3003,6 +3114,7 @@
   function renderNav() {
     var bar = el("nav", { class: "nav" }, [
       navButton("home", "Home"),
+      navButton("ready", "Messeklar"),
       navButton("research", "Research"),
       navButton("archive", "Arkiv"),
       navButton("after", "Efter")
@@ -3034,10 +3146,16 @@
   };
 
   window.addEventListener("pagehide", function () { finishRecording(true); });
-  window.addEventListener("online", function () { flush(); });
+  window.addEventListener("online", function () {
+    flush();
+    if (!state.dayFresh) refreshDay();
+  });
   document.addEventListener("visibilitychange", function () {
     if (document.visibilityState === "hidden") finishRecording(true);
-    else flush();
+    else {
+      flush();
+      if (!state.dayFresh) refreshDay();
+    }
   });
 
   state.session = loadSession();
