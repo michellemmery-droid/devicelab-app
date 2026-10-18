@@ -39,7 +39,11 @@
     db: null,
     syncing: false,
     syncAuth: false,
-    saving: false
+    saving: false,
+    runs: [],
+    followups: [],
+    afterError: "",
+    afterNotice: ""
   };
   var PHOTO_MAX_SIDE = 3200;
   var PHOTO_JPEG_QUALITY = 0.92;
@@ -53,6 +57,12 @@
     maybe: "Måske interessant",
     interesting: "Interessant",
     hot: "Hot Lead"
+  };
+  var suggestions = {
+    warm: "Varm",
+    follow: "Værd at følge",
+    cold: "Kold",
+    thin: "Ikke nok"
   };
   var actions = {
     none: "Ingen",
@@ -860,9 +870,10 @@
     else if (state.page === "capture") renderCapture();
     else if (state.page === "archive") renderArchive();
     else if (state.page === "research") renderResearch();
+    else if (state.page === "after") renderAfter();
     else if (state.page === "profile") renderProfile();
     else renderHome();
-    if (state.page === "home" || state.page === "hall" || state.page === "archive" || state.page === "research") renderNav();
+    if (state.page === "home" || state.page === "hall" || state.page === "archive" || state.page === "research" || state.page === "after") renderNav();
   }
 
   function renderLogin() {
@@ -954,11 +965,17 @@
   }
 
   async function loadRows() {
-    var query = "/rest/v1/exhibitors?select=id,company_id,name,hall,stand_number,relevance,visit_plan,next_step,summary,sales_opportunity,visited_at,"
-      + "companies(match_score,match_reason,conversation_topics,qualification_questions,customer_type,industry,biography,profile_updated_at)"
-      + "&event_id=eq." + encodeURIComponent(state.eventId)
-      + "&limit=1000";
-    state.rows = (await call(query)).map(attach);
+    var company = "companies(match_score,match_reason,conversation_topics,qualification_questions,customer_type,industry,biography,profile_updated_at)";
+    var base = "/rest/v1/exhibitors?select=id,company_id,name,hall,stand_number,relevance,visit_plan,next_step,summary,sales_opportunity,visited_at,";
+    var filter = "&event_id=eq." + encodeURIComponent(state.eventId) + "&limit=1000";
+    var rows;
+    try {
+      rows = await call(base + "fair_summary,suggestion,suggestion_reason,analyzed_at," + company + filter);
+    } catch (err) {
+      if (err.status !== 400) throw err;
+      rows = await call(base + company + filter);
+    }
+    state.rows = rows.map(attach);
     applyOverlay();
     reopenMedia();
     state.busy = false;
@@ -1339,16 +1356,28 @@
             render();
           }
         }, [el("img", { src: slot.urls[item.id] || "", alt: "Billede" })]),
-        label ? el("span", { class: label === "Fejl" ? "error media-state" : "quiet media-state" }, [label]) : null
+        label ? el("span", { class: label === "Fejl" ? "error media-state" : "quiet media-state" }, [label]) : null,
+        item.document_kind ? el("span", { class: "quiet media-state" }, [kindLabel(item.document_kind)]) : null
       ]);
     })));
     if (slot.selected) {
+      var chosen = slot.items.filter(function (item) { return item.id === slot.selected; })[0];
+      if (chosen && chosen.ocr_text) root.appendChild(el("p", { class: "quiet" }, [chosen.ocr_text]));
       root.appendChild(el("button", {
         class: "choice slim",
         type: "button",
         onclick: function () { removePhoto(exhibitorId, slot.selected); }
       }, ["Slet"]));
     }
+  }
+
+  function kindLabel(kind) {
+    if (kind === "visitkort") return "Visitkort";
+    if (kind === "brochure") return "Brochure";
+    if (kind === "produktark") return "Produktark";
+    if (kind === "ulæseligt") return "Ulæseligt";
+    if (kind === "andet") return "Andet";
+    return "";
   }
 
   function reopenMedia() {
@@ -1375,7 +1404,12 @@
     var selected = state.photos[exhibitorId] && state.photos[exhibitorId].selected;
     var server = null;
     try {
-      server = await call("/rest/v1/images?select=id,storage_key,created_at&company_id=eq." + encodeURIComponent(exhibitorId) + "&order=created_at.desc");
+      try {
+        server = await call("/rest/v1/images?select=id,storage_key,created_at,ocr_text,document_kind&company_id=eq." + encodeURIComponent(exhibitorId) + "&order=created_at.desc");
+      } catch (err) {
+        if (err.status !== 400) throw err;
+        server = await call("/rest/v1/images?select=id,storage_key,created_at&company_id=eq." + encodeURIComponent(exhibitorId) + "&order=created_at.desc");
+      }
     } catch (err) {
       server = null;
     }
@@ -1613,7 +1647,8 @@
             render();
           }
         }, [clock(item.duration_sec)]),
-        label ? el("span", { class: label === "Fejl" ? "error media-state" : "quiet media-state" }, [label]) : null
+        label ? el("span", { class: label === "Fejl" ? "error media-state" : "quiet media-state" }, [label]) : null,
+        item.transcript ? el("p", { class: "quiet media-state" }, [item.transcript]) : null
       ]));
     });
     if (slot.selected) {
@@ -1636,7 +1671,12 @@
     var previous = state.voices[exhibitorId] || {};
     var server = null;
     try {
-      server = await call("/rest/v1/voice_notes?select=id,audio_key,duration_sec,created_at&company_id=eq." + encodeURIComponent(exhibitorId) + "&order=created_at.desc");
+      try {
+        server = await call("/rest/v1/voice_notes?select=id,audio_key,duration_sec,created_at,transcript&company_id=eq." + encodeURIComponent(exhibitorId) + "&order=created_at.desc");
+      } catch (err) {
+        if (err.status !== 400) throw err;
+        server = await call("/rest/v1/voice_notes?select=id,audio_key,duration_sec,created_at&company_id=eq." + encodeURIComponent(exhibitorId) + "&order=created_at.desc");
+      }
     } catch (err) {
       server = null;
     }
@@ -2298,6 +2338,7 @@
       root.appendChild(el("p", { class: "hint" }, ["Henter profilen…"]));
       return;
     }
+    renderFairMemory(exhibitor);
     if (role && profile.biography) {
       root.appendChild(el("article", { class: "card qcard" }, [
         el("p", { class: "kicker" }, ["Forretning"]),
@@ -2416,11 +2457,198 @@
     }
   }
 
+  function renderFairMemory(exhibitor) {
+    if (!exhibitor) return;
+    var outcome = outcomes[exhibitor.relevance] || "";
+    var suggestion = suggestions[exhibitor.suggestion] || "";
+    if (exhibitor.summary) {
+      root.appendChild(el("article", { class: "card qcard" }, [
+        el("p", { class: "kicker" }, ["Mine noter"]),
+        el("p", { class: "ask" }, [exhibitor.summary])
+      ]));
+    }
+    if (outcome || suggestion) {
+      root.appendChild(el("div", { class: "badges" }, [
+        outcome ? el("span", { class: "pill" }, [outcome]) : null,
+        suggestion ? el("span", { class: "pill outline" }, ["Forslag: " + suggestion]) : null
+      ]));
+      if (exhibitor.suggestion_reason) root.appendChild(el("p", { class: "quiet" }, [exhibitor.suggestion_reason]));
+    }
+    if (exhibitor.fair_summary) {
+      root.appendChild(el("article", { class: "card qcard" }, [
+        el("p", { class: "kicker" }, ["Samtalen"]),
+        el("p", { class: "ask serif" }, [exhibitor.fair_summary])
+      ]));
+    }
+  }
+
+  function afterKey(row) {
+    var outcome = { hot: 0, interesting: 1, maybe: 2, not_interesting: 3 }[row.relevance];
+    if (outcome == null) outcome = 4;
+    var action = row.next_step ? 0 : 1;
+    var suggest = { warm: 0, follow: 1, cold: 2, thin: 3 }[row.suggestion];
+    if (suggest == null) suggest = 4;
+    return [outcome, action, suggest, -(row.match_score || 0), row.name || ""];
+  }
+
+  function compareAfter(a, b) {
+    var left = afterKey(a);
+    var right = afterKey(b);
+    for (var i = 0; i < left.length; i += 1) {
+      if (left[i] < right[i]) return -1;
+      if (left[i] > right[i]) return 1;
+    }
+    return 0;
+  }
+
+  function openFollowup(companyId) {
+    return (state.followups || []).filter(function (item) {
+      return item.company_id === companyId && !item.done;
+    })[0] || null;
+  }
+
+  function latestRun() {
+    return (state.runs || [])[0] || null;
+  }
+
+  function runActive(run) {
+    return run && (run.status === "pending" || run.status === "running");
+  }
+
+  async function refreshAfter() {
+    try {
+      state.runs = await call("/rest/v1/fair_runs?select=id,status,step,note,error,created_at&order=created_at.desc&limit=1");
+      state.followups = await call("/rest/v1/followups?select=id,company_id,title,done&limit=1000");
+      state.afterError = "";
+    } catch (err) {
+      state.afterError = "Analysen er ikke klar endnu.";
+    }
+    if (state.page === "after") render();
+  }
+
+  async function openAfter() {
+    state.page = "after";
+    state.afterNotice = "";
+    state.afterError = "";
+    render();
+    await refreshAfter();
+    if (!state.afterTimer) {
+      state.afterTimer = setInterval(function () {
+        if (state.page === "after" && runActive(latestRun())) refreshAfter();
+      }, 4000);
+    }
+  }
+
+  async function startAnalysis() {
+    if (mine().length) {
+      state.afterNotice = "Der er noget, der ikke er sendt endnu. Synk først.";
+      render();
+      return;
+    }
+    if (runActive(latestRun()) || state.afterBusy) return;
+    state.afterBusy = true;
+    state.afterNotice = "";
+    state.afterError = "";
+    render();
+    try {
+      await call("/rest/v1/fair_runs", {
+        method: "POST",
+        prefer: "return=minimal",
+        body: { event_id: state.eventId, status: "pending", step: "voice", note: "Analysen er i gang.", error: "" }
+      });
+      state.afterBusy = false;
+      await refreshAfter();
+    } catch (err) {
+      state.afterBusy = false;
+      state.afterError = "Analysen kunne ikke startes.";
+      render();
+    }
+  }
+
+  async function markFollowup(item) {
+    var previous = item.done;
+    item.done = true;
+    state.afterError = "";
+    render();
+    try {
+      await call("/rest/v1/followups?id=eq." + encodeURIComponent(item.id), {
+        method: "PATCH",
+        prefer: "return=minimal",
+        body: { done: true }
+      });
+    } catch (err) {
+      item.done = previous;
+      state.afterError = "Opfølgningen blev ikke gemt.";
+      render();
+    }
+  }
+
+  function renderAfter() {
+    var run = latestRun();
+    root.appendChild(el("p", { class: "eyebrow" }, ["Efter messen"]));
+    root.appendChild(el("h1", null, ["Opfølgning."]));
+    if (runActive(run)) {
+      root.appendChild(el("p", { class: "quiet" }, [run.note || "Analysen er i gang."]));
+    } else if (run && run.status === "done") {
+      root.appendChild(el("p", { class: "quiet" }, [run.note || "Analysen er kørt."]));
+    } else if (run && run.status === "error") {
+      root.appendChild(el("p", { class: "error" }, [run.error || "Analysen stoppede. Prøv igen."]));
+    } else {
+      root.appendChild(el("p", { class: "quiet" }, ["Analysen venter, til du starter den."]));
+    }
+    if (state.afterNotice) root.appendChild(el("p", { class: "error" }, [state.afterNotice]));
+    if (state.afterError) root.appendChild(el("p", { class: "error" }, [state.afterError]));
+    if (!runActive(run)) {
+      root.appendChild(el("button", {
+        class: "action",
+        type: "button",
+        onclick: startAnalysis
+      }, [state.afterBusy ? "Starter…" : (run && run.status === "error" ? "Prøv igen" : "Start analysen")]));
+    }
+    var rows = state.rows.filter(function (row) {
+      return outcomes[row.relevance] || openFollowup(row.id);
+    });
+    var doing = rows.filter(function (row) { return openFollowup(row.id); }).sort(compareAfter);
+    var quiet = rows.filter(function (row) { return !openFollowup(row.id); }).sort(compareAfter);
+    if (!doing.length && !quiet.length) {
+      root.appendChild(el("p", { class: "hint" }, ["Ingen opfølgninger endnu."]));
+      return;
+    }
+    renderAfterGroup("Skal gøres", doing);
+    renderAfterGroup("Uden næste handling", quiet);
+  }
+
+  function renderAfterGroup(title, rows) {
+    if (!rows.length) return;
+    root.appendChild(el("p", { class: "kicker section" }, [title]));
+    rows.forEach(function (row) {
+      var followup = openFollowup(row.id);
+      var suggestion = suggestions[row.suggestion] || "";
+      var line = [outcomes[row.relevance] || "", suggestion ? "Forslag: " + suggestion : "", followup ? followup.title : "Ingen"].filter(Boolean).join(" · ");
+      root.appendChild(el("article", null, [
+        el("button", {
+          class: "company",
+          type: "button",
+          onclick: function () { openProfile(row.company_id || row.id, "after"); }
+        }, [
+          el("b", null, [row.name]),
+          el("span", null, [standLabel(row) + (line ? " · " + line : "")])
+        ]),
+        followup ? el("button", {
+          class: "choice slim",
+          type: "button",
+          onclick: function () { markFollowup(followup); }
+        }, ["Marker som gjort"]) : null
+      ]));
+    });
+  }
+
   function renderNav() {
     var bar = el("nav", { class: "nav" }, [
       navButton("home", "Home"),
       navButton("research", "Research"),
-      navButton("archive", "Arkiv")
+      navButton("archive", "Arkiv"),
+      navButton("after", "Efter")
     ]);
     document.body.appendChild(bar);
   }
@@ -2431,6 +2659,7 @@
       type: "button",
       onclick: function () {
         if (page === "research") openResearch();
+        else if (page === "after") openAfter();
         else { state.page = page; state.notice = ""; render(); }
       }
     }, [label]);

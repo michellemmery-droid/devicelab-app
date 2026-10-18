@@ -210,6 +210,7 @@ h2 { font-size: 2rem; line-height: 1.05; }
   background: transparent;
   color: var(--faint);
   font-weight: 620;
+  font-size: 0.92rem;
 }
 .nav button.on { color: var(--ink); }
 
