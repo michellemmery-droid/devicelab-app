@@ -153,6 +153,19 @@ h2 { font-size: 2rem; line-height: 1.05; }
 .choice { min-height: 58px; font-size: 1.02rem; font-weight: 620; }
 .choice.slim { min-height: 48px; margin-top: 12px; }
 .choice.go { background: #e6efe0; color: var(--green); border-color: #c9decb; }
+.readyline {
+  display: block;
+  width: 100%;
+  margin: 8px 0 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--green);
+  font-size: 1rem;
+  font-weight: 650;
+  text-align: left;
+  min-height: 32px;
+}
 .check {
   display: flex;
   align-items: flex-start;

@@ -50,7 +50,9 @@
     afterError: "",
     afterNotice: "",
     dayFresh: false,
-    loadingDay: false
+    loadingDay: false,
+    messeDetail: false,
+    relationOpen: false
   };
   var PHOTO_MAX_SIDE = 3200;
   var PHOTO_JPEG_QUALITY = 0.92;
@@ -564,8 +566,8 @@
       }
       node.replaceWith(fresh);
     });
-    paintReady();
     paintHomeReady();
+    if (state.page === "ready") render();
   }
 
   function mediaLabel(id) {
@@ -1217,7 +1219,9 @@
     var list = document.getElementById("messe");
     if (!list) return;
     clear(list);
-    readyRows(readyReport()).forEach(function (row) {
+    var report = readyReport();
+    if (!report.ready) state.messeDetail = false;
+    readyRows(report).forEach(function (row) {
       list.appendChild(checkRow(row));
     });
   }
@@ -1227,14 +1231,33 @@
     if (!node) return;
     var ready = readyReport().ready;
     node.textContent = ready ? "Klar til messen" : "Messeklar";
-    node.className = "choice slim" + (ready ? " go" : "");
+    node.className = ready ? "readyline" : "choice slim";
   }
 
   function renderReady() {
+    var report = readyReport();
+    if (report.ready && !state.messeDetail) {
+      root.appendChild(el("p", { class: "eyebrow" }, ["Om morgenen"]));
+      root.appendChild(el("h1", null, ["Klar til messen"]));
+      root.appendChild(el("p", { class: "quiet" }, ["Du kan gå ind."]));
+      root.appendChild(el("button", {
+        class: "link",
+        type: "button",
+        onclick: function () { state.messeDetail = true; render(); }
+      }, ["Vis tjekket"]));
+      return;
+    }
     root.appendChild(el("p", { class: "eyebrow" }, ["Om morgenen"]));
     root.appendChild(el("h1", null, ["Messeklar"]));
     root.appendChild(el("div", { id: "messe" }));
     paintReady();
+    if (report.ready) {
+      root.appendChild(el("button", {
+        class: "link",
+        type: "button",
+        onclick: function () { state.messeDetail = false; render(); }
+      }, ["Skjul tjekket"]));
+    }
   }
 
   async function refreshDay() {
@@ -1267,21 +1290,10 @@
     root.appendChild(syncLine(""));
     root.appendChild(el("button", {
       id: "home-ready",
-      class: "choice slim" + (readyReport().ready ? " go" : ""),
+      class: readyReport().ready ? "readyline" : "choice slim",
       type: "button",
-      onclick: function () { state.page = "ready"; render(); }
+      onclick: function () { state.page = "ready"; state.messeDetail = false; render(); }
     }, [readyReport().ready ? "Klar til messen" : "Messeklar"]));
-    var hot = todayCount("hot");
-    var marked = todayCount("interesting");
-    var maybe = todayCount("maybe");
-    if (hot || marked || maybe) {
-      root.appendChild(el("p", { class: "quiet" }, [
-        "I dag er " + hot + " hot leads, " + marked + " interessante og " + maybe + " måske."
-      ]));
-    }
-    root.appendChild(el("p", { class: "lead" }, [
-      day.open.length + " interessante mangler."
-    ]));
     if (!next) {
       root.appendChild(el("p", { class: "quiet" }, ["Der er ikke flere åbne stande i de interessante haller."]));
     } else {
@@ -1305,6 +1317,15 @@
     root.appendChild(el("button", { class: "action", type: "button", onclick: startMission }, ["Start mission"]));
     }
     renderHalls();
+    var hot = todayCount("hot");
+    var marked = todayCount("interesting");
+    var maybe = todayCount("maybe");
+    if (hot || marked || maybe) {
+      root.appendChild(el("p", { class: "quiet" }, [
+        "I dag er " + hot + " hot leads, " + marked + " interessante og " + maybe + " måske."
+      ]));
+    }
+    root.appendChild(el("p", { class: "quiet" }, [day.open.length + " åbne på hele messen."]));
     if (state.error) root.appendChild(el("p", { class: "error" }, [state.error]));
   }
 
@@ -1459,6 +1480,8 @@
     if (state.savedName) root.appendChild(el("p", { class: "done" }, [state.savedName + " er gemt."]));
     var glance = visitGlance(row);
     if (glance) root.appendChild(el("p", { class: "quiet" }, [glance]));
+    var person = contactLine(row.id);
+    if (person) root.appendChild(el("p", { class: "ask" }, [person]));
     var line = profileLine(row);
     if (line) root.appendChild(el("p", { class: "ai" }, [line]));
     var asks = questions(row);
@@ -1470,6 +1493,14 @@
     ]));
     if (state.error) root.appendChild(el("p", { class: "error" }, [state.error]));
     renderStandMates(row);
+  }
+
+  function contactLine(companyId) {
+    var contact = latestContact(companyId);
+    if (!contact) return "";
+    return [contact.name, contact.title, contact.email, contact.phone].filter(function (part) {
+      return part && String(part).trim();
+    }).join(" · ");
   }
 
   function visitGlance(row) {
@@ -2678,6 +2709,7 @@
     state.error = "";
     state.notice = "";
     state.busy = true;
+    state.relationOpen = false;
     state.profileToken = companyId;
     state.photoError = "";
     state.voiceError = "";
@@ -2722,29 +2754,20 @@
       profile.profile_confidence === "thin" ? el("span", { class: "pill low" }, ["Tyndt grundlag"]) : null
     ]));
     var exhibitor = exhibitorRow(profile.id);
+    renderFairMemory(exhibitor);
     if (exhibitor) renderPhotos(exhibitor.id);
     if (exhibitor) renderVoices(exhibitor.id);
     if (state.busy) {
       root.appendChild(el("p", { class: "hint" }, ["Henter profilen…"]));
       return;
     }
-    renderFairMemory(exhibitor);
     if (role && profile.biography) {
       root.appendChild(el("article", { class: "card qcard" }, [
         el("p", { class: "kicker" }, ["Forretning"]),
         el("p", { class: "ask serif" }, [profile.biography])
       ]));
     }
-    root.appendChild(el("section", { class: "card" }, [
-      el("p", { class: "kicker" }, ["Relation"]),
-      el("div", { class: "relate" }, Object.keys(relations).map(function (id) {
-        return el("button", {
-          class: "choice" + ((profile.relationship_status || "new") === id ? " on" : ""),
-          type: "button",
-          onclick: function () { saveRelation(profile, id); }
-        }, [relations[id]]);
-      }))
-    ]));
+    renderRelation(profile);
     root.appendChild(el("article", { class: "card qcard" }, [
       el("p", { class: "kicker" }, ["Lead Hypothesis"]),
       el("p", { class: "ask serif" }, [profile.lead_hypothesis || "Der er ikke skrevet en hypotese endnu."])
@@ -2773,11 +2796,29 @@
     }
     if (state.notice) root.appendChild(el("p", { class: "quiet" }, [state.notice]));
     if (state.error) root.appendChild(el("p", { class: "error" }, [state.error]));
-    root.appendChild(el("button", {
-      class: "action",
-      type: "button",
-      onclick: function () { rerun(profile); }
-    }, ["Kør profilen igen"]));
+  }
+
+  function renderRelation(profile) {
+    var current = profile.relationship_status || "new";
+    if (!state.relationOpen) {
+      root.appendChild(el("button", {
+        class: "choice slim",
+        type: "button",
+        onclick: function () { state.relationOpen = true; render(); }
+      }, ["Relation · " + (relations[current] || "Ny virksomhed")]));
+      return;
+    }
+    root.appendChild(el("p", { class: "kicker section" }, ["Relation"]));
+    root.appendChild(el("div", { class: "chips" }, Object.keys(relations).map(function (id) {
+      return el("button", {
+        class: current === id ? "on" : "",
+        type: "button",
+        onclick: function () {
+          state.relationOpen = false;
+          saveRelation(profile, id);
+        }
+      }, [relations[id]]);
+    })));
   }
 
   function chipBlock(title, value) {
@@ -2799,7 +2840,11 @@
   }
 
   async function saveRelation(profile, status) {
-    if (!profile || !profile.id || profile.relationship_status === status) return;
+    if (!profile || !profile.id || profile.relationship_status === status) {
+      state.relationOpen = false;
+      render();
+      return;
+    }
     var previous = profile.relationship_status || "new";
     profile.relationship_status = status;
     state.error = "";
