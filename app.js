@@ -22,7 +22,9 @@
     busy: false,
     saved: "",
     savedName: "",
-    returnTo: "research"
+    returnTo: "research",
+    hall: "",
+    missionBack: ""
   };
 
   var outcomes = {
@@ -242,7 +244,77 @@
 
   function hallLabel(hall) {
     if (!hall) return "Uden hal";
+    if (hall === "Galeria") return "Galeria";
     return String(hall).indexOf("Hal") === 0 ? hall : "Hal " + hall;
+  }
+
+  function hallOrder(hall) {
+    if (hall === "Galeria") return 100;
+    var number = parseInt(hall, 10);
+    return isNaN(number) ? 200 : number;
+  }
+
+  function hasStand(row) {
+    return !!(row.stand_number && String(row.stand_number).trim());
+  }
+
+  function standState(members) {
+    var plans = members.map(function (row) { return row.visit_plan; });
+    var open = plans.some(function (plan) {
+      return plan === "unset" || plan === "must_visit" || plan === "return_later";
+    });
+    if (!open) return plans.some(function (plan) { return plan === "visited"; }) ? "visited" : "skip";
+    if (plans.some(function (plan) { return plan === "must_visit" || plan === "return_later"; })) return "planned";
+    return "open";
+  }
+
+  function hallNames() {
+    var seen = {};
+    state.rows.forEach(function (row) { if (row.hall) seen[row.hall] = true; });
+    return Object.keys(seen).sort(function (a, b) {
+      return hallOrder(a) - hallOrder(b) || a.localeCompare(b, "da");
+    });
+  }
+
+  function hallStats(hall) {
+    var groups = {};
+    state.rows.forEach(function (row) {
+      if (row.hall !== hall || !hasStand(row)) return;
+      var key = String(row.stand_number).trim();
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(row);
+    });
+    var stats = { stands: 0, visited: 0, planned: 0, open: 0, skip: 0, coverage: 0 };
+    Object.keys(groups).forEach(function (key) {
+      stats.stands += 1;
+      stats[standState(groups[key])] += 1;
+    });
+    stats.coverage = stats.stands ? Math.round(100 * stats.visited / stats.stands) : 0;
+    return stats;
+  }
+
+  function coverageLine(stats) {
+    var parts = [stats.visited + " besøgt", stats.planned + " planlagt", stats.open + " mangler"];
+    if (stats.skip) parts.push(stats.skip + " sprunget over");
+    return parts.join(" · ");
+  }
+
+  function companyOpen(row) {
+    return row.visit_plan === "unset" || row.visit_plan === "must_visit" || row.visit_plan === "return_later";
+  }
+
+  function missingRank(row) {
+    if (row.visit_plan === "return_later") return 0;
+    if (row.visit_plan === "must_visit") return 1;
+    return 2;
+  }
+
+  function missingIn(hall) {
+    return state.rows.filter(function (row) {
+      return row.hall === hall && companyOpen(row);
+    }).sort(function (a, b) {
+      return missingRank(a) - missingRank(b) || (b.match_score - a.match_score) || a.name.localeCompare(b.name, "da");
+    });
   }
 
   function standLabel(row) {
@@ -295,12 +367,13 @@
       return;
     }
     if (state.page === "mission") renderMission();
+    else if (state.page === "hall") renderHall();
     else if (state.page === "capture") renderCapture();
     else if (state.page === "archive") renderArchive();
     else if (state.page === "research") renderResearch();
     else if (state.page === "profile") renderProfile();
     else renderHome();
-    if (state.page === "home" || state.page === "archive" || state.page === "research") renderNav();
+    if (state.page === "home" || state.page === "hall" || state.page === "archive" || state.page === "research") renderNav();
   }
 
   function renderLogin() {
@@ -384,8 +457,7 @@
     ]));
     if (!next) {
       root.appendChild(el("p", { class: "quiet" }, ["Der er ikke flere åbne stande i de interessante haller."]));
-      return;
-    }
+    } else {
     root.appendChild(el("p", { class: "lead" }, [
       hallLabel(day.hall) + " giver mest lige nu. ",
       el("b", null, [String(day.queue.length) + " interessante står der."])
@@ -404,13 +476,137 @@
       return el("div", { class: "stop" }, [el("b", null, [row.name]), el("span", null, [String(row.match_score)])]);
     }))));
     root.appendChild(el("button", { class: "action", type: "button", onclick: startMission }, ["Start mission"]));
+    }
+    renderHalls();
     if (state.error) root.appendChild(el("p", { class: "error" }, [state.error]));
+  }
+
+  function renderHalls() {
+    root.appendChild(el("div", { class: "halls" }, [
+      el("p", { class: "kicker" }, ["Haller"]),
+      el("p", { class: "quiet" }, [
+        state.here ? "Du arbejder i " + hallLabel(state.here.hall) + "." : "Vælg en hal og arbejd den færdig."
+      ])
+    ]));
+    hallNames().forEach(function (hall) {
+      var stats = hallStats(hall);
+      var current = state.here && state.here.hall === hall;
+      root.appendChild(el("button", {
+        class: "hall" + (current ? " on" : ""),
+        type: "button",
+        onclick: function () { openHall(hall); }
+      }, [
+        el("span", { class: "hallname" }, [
+          el("b", null, [hallLabel(hall)]),
+          el("span", null, [stats.stands + " stande · " + coverageLine(stats)])
+        ]),
+        el("strong", { class: "pct" }, [stats.coverage + " %"])
+      ]));
+    });
+  }
+
+  function openHall(hall) {
+    state.hall = hall;
+    state.page = "hall";
+    state.error = "";
+    render();
+  }
+
+  function renderHall() {
+    var hall = state.hall;
+    var stats = hallStats(hall);
+    var missing = missingIn(hall);
+    var named = missing.filter(hasStand);
+    var unnamed = missing.filter(function (row) { return !hasStand(row); });
+    root.appendChild(el("div", { class: "top" }, [
+      el("p", { class: "eyebrow" }, [stats.stands + " stande"]),
+      el("button", { class: "link", type: "button", onclick: function () { state.page = "home"; render(); } }, ["Tilbage"])
+    ]));
+    root.appendChild(el("h1", null, [hallLabel(hall)]));
+    if (state.savedName) {
+      root.appendChild(el("p", { class: "done" }, [state.savedName + " er gemt."]));
+      state.savedName = "";
+    }
+    root.appendChild(el("p", { class: "lead" }, ["Dækning " + stats.coverage + " %"]));
+    root.appendChild(el("p", { class: "quiet" }, [coverageLine(stats)]));
+    root.appendChild(el("p", { class: "kicker section" }, ["Mangler i " + hallLabel(hall)]));
+    if (!named.length) {
+      root.appendChild(el("p", { class: "quiet" }, ["Ingen åbne stande i hallen."]));
+    }
+    named.forEach(function (row) { root.appendChild(missingRow(row)); });
+    if (unnamed.length) {
+      root.appendChild(el("p", { class: "kicker section" }, ["Uden stand"]));
+      unnamed.forEach(function (row) { root.appendChild(missingRow(row)); });
+    }
+    if (state.error) root.appendChild(el("p", { class: "error" }, [state.error]));
+  }
+
+  function planLabel(row) {
+    if (row.visit_plan === "return_later") return "Kom tilbage";
+    if (row.visit_plan === "must_visit") return "Skal besøges";
+    return "Ikke besøgt";
+  }
+
+  function missingRow(row) {
+    var place = hasStand(row) ? row.stand_number : "Uden stand";
+    var open = el("button", {
+      class: "company hallco",
+      type: "button",
+      onclick: function () { openHallCompany(row); }
+    }, [
+      el("span", { class: "hallco-name" }, [
+        el("b", null, [row.name]),
+        el("span", null, [place + " · " + planLabel(row)])
+      ]),
+      el("span", { class: "hallco-score" }, [String(row.match_score || 0)])
+    ]);
+    var star = null;
+    if (row.visit_plan !== "return_later") {
+      var on = row.visit_plan === "must_visit";
+      star = el("button", {
+        class: "planbtn" + (on ? " on" : ""),
+        type: "button",
+        onclick: function () { setPlan(row, on ? "unset" : "must_visit"); }
+      }, [on ? "Planlagt" : "Planlæg"]);
+    }
+    return el("div", { class: "gaprow" }, star ? [open, star] : [open]);
+  }
+
+  function openHallCompany(row) {
+    var queue = missingIn(row.hall);
+    var index = 0;
+    queue.forEach(function (item, at) { if (item.id === row.id) index = at; });
+    state.mission = queue;
+    state.index = index;
+    state.missionBack = "hall";
+    state.hall = row.hall;
+    state.page = "mission";
+    state.savedName = "";
+    state.error = "";
+    render();
+  }
+
+  async function setPlan(row, planName) {
+    state.error = "";
+    try {
+      await call("/rest/v1/exhibitors?id=eq." + encodeURIComponent(row.id), {
+        method: "PATCH",
+        prefer: "return=minimal",
+        body: { visit_plan: planName, updated_at: new Date().toISOString() }
+      });
+      row.visit_plan = planName;
+      render();
+    } catch (err) {
+      state.error = "Status kunne ikke gemmes.";
+      render();
+    }
   }
 
   function startMission() {
     var day = plan();
     state.mission = day.queue;
     state.index = 0;
+    state.missionBack = "";
     state.page = "mission";
     state.error = "";
     render();
@@ -430,7 +626,7 @@
     }
     root.appendChild(el("div", { class: "top" }, [
       el("p", { class: "eyebrow" }, [standLabel(row)]),
-      el("button", { class: "link", type: "button", onclick: function () { state.page = "home"; render(); } }, ["Luk"])
+      el("button", { class: "link", type: "button", onclick: closeMission }, [state.missionBack === "hall" ? "Tilbage" : "Luk"])
     ]));
     root.appendChild(el("h1", null, [row.name]));
     if (state.savedName) root.appendChild(el("p", { class: "done" }, [state.savedName + " er gemt."]));
@@ -473,9 +669,14 @@
     }
   }
 
+  function closeMission() {
+    state.page = state.missionBack === "hall" ? "hall" : "home";
+    render();
+  }
+
   function advance() {
     state.index += 1;
-    if (!current()) state.page = "home";
+    if (!current()) state.page = state.missionBack === "hall" ? "hall" : "home";
     else state.page = "mission";
     render();
   }
