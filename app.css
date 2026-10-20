@@ -82,6 +82,10 @@ h2 { font-size: 2rem; line-height: 1.05; }
 .person a { color: inherit; }
 .fold { padding: 0; }
 .fold-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   width: 100%;
   text-align: left;
   background: transparent;
@@ -90,6 +94,15 @@ h2 { font-size: 2rem; line-height: 1.05; }
   font-size: 1.05rem;
   font-weight: 640;
 }
+.fold-chevron {
+  flex: none;
+  color: var(--faint);
+  font-size: 1.25rem;
+  line-height: 1;
+}
+.fold.open .fold-chevron { transform: rotate(90deg); }
+.note-item { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.note-item .ask { margin-top: 0; font-size: 1.08rem; }
 .fold-body { padding: 0 18px 16px; }
 .fold-body .ask:first-child { margin-top: 0; }
 .who { margin: 6px 0 0; font-size: 2rem; line-height: 1.05; letter-spacing: -0.04em; font-weight: 640; }
@@ -186,7 +199,7 @@ h2 { font-size: 2rem; line-height: 1.05; }
   font-size: 1.12rem;
   font-weight: 650;
 }
-.action[disabled] { opacity: 0.45; }
+.action[disabled], .choice[disabled] { opacity: 0.45; }
 .action.ghost, .choice {
   background: var(--card);
   color: var(--ink);

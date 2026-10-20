@@ -54,7 +54,10 @@
     messeDetail: false,
     relationOpen: false,
     folds: {},
-    contactDraft: null
+    contactDraft: null,
+    noteDraft: "",
+    noteSaving: false,
+    noteError: ""
   };
   var PHOTO_MAX_SIDE = 3200;
   var PHOTO_JPEG_QUALITY = 0.92;
@@ -2724,6 +2727,9 @@
     state.relationOpen = false;
     state.folds = {};
     state.contactDraft = null;
+    state.noteDraft = "";
+    state.noteSaving = false;
+    state.noteError = "";
     state.profileToken = companyId;
     state.photoError = "";
     state.voiceError = "";
@@ -2797,19 +2803,123 @@
 
   function renderVisitPack(exhibitor) {
     root.appendChild(el("p", { class: "kicker section" }, ["Messebesøg"]));
-    var note = visibleNote(exhibitor);
-    root.appendChild(el("p", { class: "kicker sub" }, ["Noter"]));
-    root.appendChild(el("p", { class: note ? "ask" : "quiet" }, [note || "Ingen noter endnu."]));
-    if (exhibitor && exhibitor.fair_summary) {
+    renderProfileNotes(exhibitor);
+    if (!exhibitor) {
+      root.appendChild(el("p", { class: "quiet" }, ["Stemmenoter og billeder hører til besøget."]));
+      return;
+    }
+    renderVoices(exhibitor.id, "inside");
+    renderPhotos(exhibitor.id, "inside");
+    if (exhibitor.fair_summary) {
       root.appendChild(el("p", { class: "kicker sub" }, ["Samtalen"]));
       root.appendChild(el("p", { class: "ask" }, [exhibitor.fair_summary]));
     }
+  }
+
+  function profileNotes(exhibitor) {
+    if (!exhibitor) return [];
+    var notes = knownNotes(exhibitor.id).filter(function (item) {
+      return (item.body || "").trim();
+    });
+    var summary = (exhibitor.summary || "").trim();
+    if (summary && !notes.some(function (item) { return (item.body || "").trim() === summary; })) {
+      notes.push({ body: summary, created_at: exhibitor.updated_at || exhibitor.visited_at || "" });
+    }
+    return notes.sort(byNewest);
+  }
+
+  function noteWhen(value) {
+    if (!value) return "";
+    var date = new Date(value);
+    if (isNaN(date.getTime())) return "";
+    return date.toLocaleString("da-DK", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  }
+
+  function renderProfileNotes(exhibitor) {
+    root.appendChild(el("p", { class: "kicker sub" }, ["Noter"]));
     if (!exhibitor) {
-      root.appendChild(el("p", { class: "quiet" }, ["Billeder og stemmenoter hører til besøget."]));
+      root.appendChild(el("p", { class: "quiet" }, ["Ingen noter endnu."]));
       return;
     }
-    renderPhotos(exhibitor.id, "inside");
-    renderVoices(exhibitor.id, "inside");
+    var box = el("textarea", { class: "area", placeholder: "Skriv note..." });
+    box.value = state.noteDraft || "";
+    box.addEventListener("input", function () {
+      state.noteDraft = box.value;
+      state.noteError = "";
+    });
+    root.appendChild(box);
+    if (state.noteError) root.appendChild(el("p", { class: "error" }, [state.noteError]));
+    root.appendChild(el("button", {
+      class: "choice slim",
+      type: "button",
+      disabled: state.noteSaving ? "" : null,
+      onclick: function () { saveProfileNote(exhibitor); }
+    }, [state.noteSaving ? "Gemmer…" : "Gem note"]));
+    var notes = profileNotes(exhibitor);
+    if (!notes.length) {
+      root.appendChild(el("p", { class: "quiet" }, ["Ingen noter endnu."]));
+      return;
+    }
+    notes.forEach(function (item) {
+      var when = noteWhen(item.created_at);
+      root.appendChild(el("article", { class: "note-item" }, [
+        el("p", { class: "ask" }, [item.body.trim()]),
+        when ? el("p", { class: "quiet" }, [when]) : null
+      ]));
+    });
+  }
+
+  async function saveProfileNote(exhibitor) {
+    if (!exhibitor || state.noteSaving) return;
+    var text = (state.noteDraft || "").trim();
+    if (!text) {
+      state.noteError = "Skriv en note.";
+      render();
+      return;
+    }
+    var duplicate = knownNotes(exhibitor.id).some(function (item) {
+      return (item.body || "").trim() === text;
+    });
+    var summarySame = (exhibitor.summary || "").trim() === text;
+    if (duplicate && summarySame) {
+      state.noteDraft = "";
+      state.noteError = "";
+      render();
+      return;
+    }
+    state.noteSaving = true;
+    state.noteError = "";
+    render();
+    var when = new Date().toISOString();
+    try {
+      if (!duplicate) {
+        var op = textOp(exhibitor.id, "note", {
+          id: "",
+          company_id: exhibitor.id,
+          body: text,
+          created_at: when
+        }, when);
+        await rememberAll([op]);
+        state.notes = [op.body].concat(state.notes || []);
+      }
+      if (!summarySame) {
+        await enqueueVisit(exhibitor.id, { summary: text, updated_at: when });
+        exhibitor.summary = text;
+        if (state.captureFor && state.captureFor.id === exhibitor.id && state.form && !state.form.touched.notes) {
+          state.form.notes = text;
+          if (state.form.snapshot) state.form.snapshot.notes = text;
+        }
+      }
+      state.noteDraft = "";
+      state.noteSaving = false;
+      flush();
+      saveFair();
+      render();
+    } catch (err) {
+      state.noteSaving = false;
+      state.noteError = "Noten kunne ikke gemmes.";
+      render();
+    }
   }
 
   function renderProfileContacts(exhibitor) {
@@ -2950,7 +3060,7 @@
   function foldCard(id, title, nodes) {
     if (!nodes || !nodes.length) return;
     var open = !!state.folds[id];
-    root.appendChild(el("article", { class: "card fold" }, [
+    root.appendChild(el("article", { class: "card fold" + (open ? " open" : "") }, [
       el("button", {
         class: "fold-toggle",
         type: "button",
@@ -2958,7 +3068,10 @@
           state.folds[id] = !open;
           render();
         }
-      }, [(open ? "▼ " : "▶ ") + title]),
+      }, [
+        el("span", null, [title]),
+        el("span", { class: "fold-chevron", "aria-hidden": "true" }, [">"])
+      ]),
       open ? el("div", { class: "fold-body" }, nodes) : null
     ]));
   }
