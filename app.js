@@ -28,6 +28,10 @@
     mapFocusId: "",
     mapBack: "home",
     mapView: "list",
+    mapMode: "mission",
+    mapPriority: true,
+    mapVisited: false,
+    mapLabels: true,
     missionBack: "",
     photos: {},
     photoError: "",
@@ -314,6 +318,32 @@
   function saveHere(row) {
     state.here = row ? { id: row.id, name: row.name, hall: row.hall, stand: row.stand_number } : null;
     if (state.here) localStorage.setItem("dl-here", JSON.stringify(state.here));
+  }
+
+  function loadMapPrefs() {
+    try {
+      var saved = JSON.parse(localStorage.getItem("dl-map") || "");
+      if (!saved || (saved.mode !== "orient" && saved.mode !== "mission")) return null;
+      return {
+        mode: saved.mode,
+        priority: saved.priority !== false,
+        visited: !!saved.visited,
+        labels: saved.labels !== false
+      };
+    } catch (err) {
+      return null;
+    }
+  }
+
+  function saveMapPrefs() {
+    try {
+      localStorage.setItem("dl-map", JSON.stringify({
+        mode: state.mapMode,
+        priority: !!state.mapPriority,
+        visited: !!state.mapVisited,
+        labels: !!state.mapLabels
+      }));
+    } catch (err) { /* private mode */ }
   }
 
   function userId() {
@@ -3565,9 +3595,9 @@
     var hall = (focus && focus.hall) || state.mapHall || "1";
     state.mapHall = hall;
     var target = focusPin(focus);
-    var screen = el("div", { class: "map-screen" });
+    var screen = el("div", { class: "map-screen" + (state.mapMode === "orient" ? " orient" : "") });
     var stage = el("div", { class: "map-stage" });
-    var world = el("div", { class: "map-world" });
+    var world = el("div", { class: mapWorldClass() });
     var file = (mapData().halls || {})[hall];
     var image = file ? el("img", { alt: hallLabel(hall), src: file, draggable: "false" }) : null;
     if (image) world.appendChild(image);
@@ -3597,16 +3627,22 @@
       ]));
     });
     stage.appendChild(world);
+    screen.appendChild(el("div", { class: "map-bar" }, [
+      el("button", {
+        class: "map-back",
+        type: "button",
+        onclick: function () {
+          state.mapView = "list";
+          state.mapFocusId = "";
+          render();
+        }
+      }, ["Tilbage til haller"]),
+      el("div", { class: "map-modes" }, [
+        mapModeButton("orient", "Orientering"),
+        mapModeButton("mission", "Mission")
+      ])
+    ]));
     screen.appendChild(stage);
-    screen.appendChild(el("button", {
-      class: "map-back",
-      type: "button",
-      onclick: function () {
-        state.mapView = "list";
-        state.mapFocusId = "";
-        render();
-      }
-    }, ["Tilbage til haller"]));
     if (focus && !target) {
       screen.appendChild(el("div", { class: "map-miss" }, [
         el("b", null, [focus.stand_number ? "Stand " + focus.stand_number : hallLabel(focus.hall)]),
@@ -3614,8 +3650,79 @@
         el("span", null, ["Find navnet på kortet."])
       ]));
     }
+    screen.appendChild(el("div", {
+      class: "map-layers",
+      hidden: state.mapMode === "mission" ? null : "hidden"
+    }, [
+      mapLayerButton("mapPriority", "Vis prioriteringer"),
+      mapLayerButton("mapVisited", "Vis besøgte"),
+      mapLayerButton("mapLabels", "Vis labels")
+    ]));
     root.appendChild(screen);
     if (image) mountFloor(stage, world, image, target);
+  }
+
+  function mapWorldClass() {
+    return "map-world"
+      + (state.mapMode === "mission" ? " mode-mission" : "")
+      + (state.mapPriority ? " show-priority" : "")
+      + (state.mapVisited ? " show-visited" : "")
+      + (state.mapLabels ? " show-labels" : "");
+  }
+
+  function mapModeButton(mode, label) {
+    return el("button", {
+      class: "map-mode" + (state.mapMode === mode ? " on" : ""),
+      type: "button",
+      "data-mode": mode,
+      onclick: function () {
+        if (state.mapMode === mode) return;
+        state.mapMode = mode;
+        saveMapPrefs();
+        paintMapChrome();
+      }
+    }, [label]);
+  }
+
+  function mapLayerButton(key, label) {
+    return el("button", {
+      class: "map-layer" + (state[key] ? " on" : ""),
+      type: "button",
+      "data-layer": key,
+      "aria-pressed": state[key] ? "true" : "false",
+      onclick: function () {
+        state[key] = !state[key];
+        saveMapPrefs();
+        paintMapChrome();
+      }
+    }, [label]);
+  }
+
+  function paintMapChrome() {
+    var screen = document.querySelector(".map-screen");
+    var world = document.querySelector(".map-world");
+    var stage = document.querySelector(".map-stage");
+    var layers = document.querySelector(".map-layers");
+    if (screen) screen.classList.toggle("orient", state.mapMode !== "mission");
+    if (layers) layers.hidden = state.mapMode !== "mission";
+    if (world) {
+      world.classList.toggle("mode-mission", state.mapMode === "mission");
+      world.classList.toggle("show-priority", !!state.mapPriority);
+      world.classList.toggle("show-visited", !!state.mapVisited);
+      world.classList.toggle("show-labels", !!state.mapLabels);
+    }
+    document.querySelectorAll(".map-mode").forEach(function (button) {
+      button.classList.toggle("on", button.getAttribute("data-mode") === state.mapMode);
+    });
+    document.querySelectorAll(".map-layer").forEach(function (button) {
+      var on = !!state[button.getAttribute("data-layer")];
+      button.classList.toggle("on", on);
+      button.setAttribute("aria-pressed", on ? "true" : "false");
+    });
+    if (stage && world) {
+      clampPan(stage);
+      applyCam(world);
+    }
   }
 
   function legendDot(tone, label) {
@@ -3626,9 +3733,12 @@
   }
 
   function applyCam(world) {
+    var zoom = mapCam.scale / (mapCam.fit || 1);
     world.style.transform = "translate(" + mapCam.x + "px," + mapCam.y + "px) scale(" + mapCam.scale + ")";
     world.style.setProperty("--s", String(mapCam.scale));
-    world.classList.toggle("named", mapCam.scale >= mapCam.fit * 2.2);
+    world.setAttribute("data-zoom", zoom >= 2.5 ? "name" : (zoom >= 1.5 ? "stand" : "dots"));
+    world.classList.toggle("z-stand", zoom >= 1.5);
+    world.classList.toggle("z-name", zoom >= 2.5);
   }
 
   function clampPan(stage) {
@@ -3658,7 +3768,7 @@
 
   function frameCam(stage, world, frac) {
     mapCam.fit = Math.min(stage.clientWidth / mapCam.iw, stage.clientHeight / mapCam.ih) || 1;
-    mapCam.scale = frac ? mapCam.fit * 4 : mapCam.fit;
+    mapCam.scale = frac ? mapCam.fit * 2.2 : mapCam.fit;
     var width = mapCam.iw * mapCam.scale;
     var height = mapCam.ih * mapCam.scale;
     if (frac) {
@@ -3802,6 +3912,14 @@
       if (!state.dayFresh) refreshDay();
     }
   });
+
+  var mapPrefs = loadMapPrefs();
+  if (mapPrefs) {
+    state.mapMode = mapPrefs.mode;
+    state.mapPriority = mapPrefs.priority;
+    state.mapVisited = mapPrefs.visited;
+    state.mapLabels = mapPrefs.labels;
+  }
 
   state.session = loadSession();
   if (state.session) boot();
