@@ -124,6 +124,7 @@
     "Kommunikationsleverandør",
     "Energiselskab",
     "Konsulenthus",
+    "Industry Media",
     "Andet"
   ];
 
