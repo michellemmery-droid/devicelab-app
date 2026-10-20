@@ -312,7 +312,7 @@ h2 { font-size: 2rem; line-height: 1.05; }
   background: transparent;
   color: var(--faint);
   font-weight: 620;
-  font-size: 0.92rem;
+  font-size: 0.82rem;
 }
 .nav button.on { color: var(--ink); }
 
@@ -410,3 +410,40 @@ a { color: var(--ink); }
   background: var(--bg);
 }
 .dock .action { margin-top: 0; }
+
+.place { margin-top: 18px; }
+.place .action { margin-top: 14px; }
+.map-stage {
+  margin-top: 16px;
+  max-height: 70dvh;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: #f7f1e7;
+  -webkit-overflow-scrolling: touch;
+}
+.map-frame { position: relative; }
+.map-frame.zoom { width: 220%; }
+.map-stage:has(.map-frame.zoom) { height: 68dvh; }
+.map-frame img { display: block; width: 100%; height: auto; }
+.pin {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  margin: -8px 0 0 -8px;
+  padding: 0;
+  border: 2px solid #fffaf3;
+  border-radius: 50%;
+}
+.pin.on { width: 26px; height: 26px; margin: -13px 0 0 -13px; z-index: 2; }
+.pin.high { background: #c23b2e; }
+.pin.medium { background: #d7a21a; }
+.pin.low { background: #2f8f4e; }
+.pin.visited { background: #2f6fbe; }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 14px; margin-top: 12px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 0.92rem; }
+.dot { width: 10px; height: 10px; border-radius: 50%; }
+.dot.high { background: #c23b2e; }
+.dot.medium { background: #d7a21a; }
+.dot.low { background: #2f8f4e; }
+.dot.visited { background: #2f6fbe; }

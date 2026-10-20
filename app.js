@@ -24,6 +24,9 @@
     savedName: "",
     returnTo: "research",
     hall: "",
+    mapHall: "",
+    mapFocusId: "",
+    mapBack: "home",
     missionBack: "",
     photos: {},
     photoError: "",
@@ -962,6 +965,84 @@
     return row.visit_plan === "unset" || row.visit_plan === "must_visit" || row.visit_plan === "return_later";
   }
 
+  var mapStop = {
+    energy: 1, power: 1, water: 1, group: 1, gruppe: 1, systems: 1, system: 1,
+    solutions: 1, solution: 1, service: 1, services: 1, gmbh: 1, holding: 1,
+    international: 1, deutschland: 1, germany: 1, digital: 1, smart: 1, tech: 1,
+    technologies: 1, ag: 1, se: 1, kg: 1, co: 1, ltd: 1, limited: 1, inc: 1,
+    sa: 1, sau: 1, bv: 1, aps: 1, as: 1, ab: 1, oy: 1, plc: 1, ug: 1, ev: 1,
+    und: 1, and: 1, the: 1, of: 1, fuer: 1, fur: 1, media: 1, verlag: 1
+  };
+
+  function mapKey(name) {
+    var text = (name || "").normalize("NFKC").toLowerCase().replace(/&/g, " and ");
+    text = text.replace(/[^a-z0-9+]+/g, " ");
+    return text.split(" ").filter(function (part) {
+      return part.length > 2 && !mapStop[part];
+    }).join(" ");
+  }
+
+  function mapTone(row) {
+    if (row.visit_plan === "visited") return "visited";
+    var score = Number(row.match_score) || 0;
+    if (row.visit_plan === "must_visit" || row.visit_plan === "return_later" || score >= 70) return "high";
+    if (score >= 40) return "medium";
+    return "low";
+  }
+
+  function hallWork(hall) {
+    var open = state.rows.filter(function (row) { return row.hall === hall && companyOpen(row); });
+    return {
+      open: open.length,
+      high: open.filter(function (row) { return mapTone(row) === "high"; }).length
+    };
+  }
+
+  function mapHallOrder() {
+    return ["1", "2", "3", "4", "5", "6", "7", "8", "Galeria"];
+  }
+
+  function mapData() {
+    return window.DL_MAP || { halls: {}, pins: [] };
+  }
+
+  function focusPin(row) {
+    if (!row) return null;
+    var key = mapKey(row.name);
+    if (key.length < 5) return null;
+    var pins = mapData().pins || [];
+    for (var i = 0; i < pins.length; i++) {
+      if (pins[i].hall === row.hall && pins[i].key === key) return pins[i];
+    }
+    return null;
+  }
+
+  function pinRows(pin) {
+    return state.rows.filter(function (row) {
+      return row.hall === pin.hall && mapKey(row.name) === pin.key;
+    });
+  }
+
+  function pinTone(pin) {
+    var rows = pinRows(pin);
+    if (!rows.length) return "low";
+    var rank = { high: 3, medium: 2, low: 1, visited: 0 };
+    return rows.map(mapTone).sort(function (a, b) { return rank[b] - rank[a]; })[0];
+  }
+
+  function openMap(row, back) {
+    state.mapBack = back || "home";
+    if (row) {
+      state.mapHall = row.hall || state.mapHall || "1";
+      state.mapFocusId = row.id || "";
+    } else if (!state.mapHall) {
+      state.mapHall = (state.here && state.here.hall) || "1";
+    }
+    state.page = "map";
+    state.error = "";
+    render();
+  }
+
   function missingRank(row) {
     if (row.visit_plan === "return_later") return 0;
     if (row.visit_plan === "must_visit") return 1;
@@ -1025,6 +1106,7 @@
       return;
     }
     if (state.page === "mission") renderMission();
+    else if (state.page === "map") renderMap();
     else if (state.page === "hall") renderHall();
     else if (state.page === "capture") renderCapture();
     else if (state.page === "archive") renderArchive();
@@ -1033,7 +1115,7 @@
     else if (state.page === "ready") renderReady();
     else if (state.page === "profile") renderProfile();
     else renderHome();
-    if (state.page === "home" || state.page === "hall" || state.page === "archive" || state.page === "research" || state.page === "after" || state.page === "ready") renderNav();
+    if (state.page === "home" || state.page === "hall" || state.page === "archive" || state.page === "research" || state.page === "after" || state.page === "ready" || state.page === "map") renderNav();
   }
 
   function renderLogin() {
@@ -1510,8 +1592,19 @@
       el("button", { class: "choice", type: "button", onclick: function () { mark(row, "return_later"); } }, ["Senere"]),
       el("button", { class: "choice", type: "button", onclick: function () { mark(row, "skip"); } }, ["Spring over"])
     ]));
+    if (row.hall) {
+      var here = hallWork(row.hall);
+      root.appendChild(el("button", { class: "choice", type: "button", onclick: function () { openMap(row, "mission"); } }, ["Vis på kort"]));
+      root.appendChild(el("p", { class: "quiet" }, [
+        here.high + " høj prioritet · " + (here.open === 1 ? "1 ubesøgt" : here.open + " ubesøgte") + " i " + hallLabel(row.hall)
+      ]));
+    }
     if (state.error) root.appendChild(el("p", { class: "error" }, [state.error]));
     renderStandMates(row);
+    root.appendChild(el("p", { class: "kicker section" }, ["Haller"]));
+    mapHallOrder().forEach(function (hall) {
+      root.appendChild(hallCountButton(hall));
+    });
   }
 
   function contactLine(companyId) {
@@ -2770,6 +2863,7 @@
       exhibitor ? el("span", { class: "pill outline" }, [mateLabel(exhibitor)]) : null,
       el("span", { class: "pill score" }, ["Score " + (profile.match_score || 0)])
     ]));
+    if (exhibitor) root.appendChild(placeCard(exhibitor));
     renderRelation(profile);
     renderProfileContacts(exhibitor);
     renderLeadStatus(exhibitor);
@@ -3401,9 +3495,113 @@
     ]);
   }
 
+  function placeCard(row) {
+    return el("div", { class: "place" }, [
+      el("p", { class: "status-line" }, [hallLabel(row.hall)]),
+      el("p", { class: "quiet" }, [row.stand_number ? "Stand " + row.stand_number : "Uden standnummer"]),
+      row.hall ? el("button", {
+        class: "action",
+        type: "button",
+        onclick: function () { openMap(row, "profile"); }
+      }, ["Vis på kort"]) : null
+    ]);
+  }
+
+  function hallCountButton(hall) {
+    var work = hallWork(hall);
+    return el("button", {
+      class: "hall" + (state.page === "map" && state.mapHall === hall ? " on" : ""),
+      type: "button",
+      onclick: function () {
+        state.mapHall = hall;
+        state.mapFocusId = "";
+        state.page = "map";
+        render();
+      }
+    }, [
+      el("span", { class: "hallname" }, [
+        el("b", null, [hallLabel(hall)]),
+        el("span", null, [work.high + " høj prioritet"]),
+        el("span", null, [work.open === 1 ? "1 ubesøgt" : work.open + " ubesøgte"])
+      ])
+    ]);
+  }
+
+  function renderMap() {
+    var focus = state.rows.filter(function (row) { return row.id === state.mapFocusId; })[0] || null;
+    var hall = (focus && focus.hall) || state.mapHall || "1";
+    state.mapHall = hall;
+    var back = state.mapBack === "profile" ? "Tilbage" : (state.mapBack === "mission" ? "Tilbage" : "Luk");
+    root.appendChild(topBar(back, function () {
+      state.page = state.mapBack || "home";
+      render();
+    }, focus ? standLabel(focus) : hallLabel(hall)));
+    if (focus) {
+      root.appendChild(el("h1", null, [focus.stand_number ? "Stand " + focus.stand_number : hallLabel(focus.hall)]));
+      root.appendChild(el("p", { class: "lead" }, [focus.name]));
+      root.appendChild(el("p", { class: "quiet" }, [hallLabel(focus.hall)]));
+    } else {
+      root.appendChild(el("h1", null, ["Messekort"]));
+      root.appendChild(el("p", { class: "quiet" }, ["Vælg en hal og find den næste stand."]));
+    }
+    var file = (mapData().halls || {})[hall];
+    var pin = focusPin(focus);
+    var frame = el("div", { class: "map-frame" + (pin ? " zoom" : "") });
+    if (file) {
+      var image = el("img", { alt: hallLabel(hall), src: file });
+      image.addEventListener("load", centerMapPin);
+      frame.appendChild(image);
+      (mapData().pins || []).filter(function (item) { return item.hall === hall; }).forEach(function (item) {
+        var rows = pinRows(item);
+        var marked = pin && item.key === pin.key;
+        frame.appendChild(el("button", {
+          class: "pin " + pinTone(item) + (marked ? " on" : ""),
+          type: "button",
+          title: rows.length ? rows[0].name : item.key,
+          style: "left:" + (item.x * 100) + "%;top:" + (item.y * 100) + "%",
+          onclick: function () {
+            if (!rows.length) return;
+            state.mapFocusId = rows[0].id;
+            state.mapHall = rows[0].hall;
+            render();
+          }
+        }));
+      });
+    }
+    root.appendChild(el("div", { class: "map-stage" }, [frame]));
+    if (focus && !pin) {
+      root.appendChild(el("p", { class: "quiet" }, ["Standen er ikke prikket endnu. Kig efter nummeret i hallen."]));
+    }
+    root.appendChild(el("div", { class: "legend" }, [
+      legendDot("high", "Høj prioritet"),
+      legendDot("medium", "Mellem"),
+      legendDot("low", "Lav prioritet"),
+      legendDot("visited", "Besøgt")
+    ]));
+    root.appendChild(el("p", { class: "kicker section" }, ["Haller"]));
+    mapHallOrder().forEach(function (name) { root.appendChild(hallCountButton(name)); });
+    requestAnimationFrame(centerMapPin);
+  }
+
+  function legendDot(tone, label) {
+    return el("span", null, [
+      el("i", { class: "dot " + tone }),
+      label
+    ]);
+  }
+
+  function centerMapPin() {
+    var stage = document.querySelector(".map-stage");
+    var pin = document.querySelector(".map-frame .pin.on");
+    if (!stage || !pin) return;
+    stage.scrollLeft = pin.offsetLeft - stage.clientWidth / 2;
+    stage.scrollTop = pin.offsetTop - stage.clientHeight / 2;
+  }
+
   function renderNav() {
     var bar = el("nav", { class: "nav" }, [
       navButton("home", "Home"),
+      navButton("map", "Kort"),
       navButton("research", "Research"),
       navButton("archive", "Arkiv"),
       navButton("after", "Efter")
@@ -3418,6 +3616,14 @@
       onclick: function () {
         if (page === "research") openResearch();
         else if (page === "after") openAfter();
+        else if (page === "map") {
+          state.mapFocusId = "";
+          state.mapBack = "home";
+          if (!state.mapHall) state.mapHall = (state.here && state.here.hall) || "1";
+          state.page = "map";
+          state.notice = "";
+          render();
+        }
         else { state.page = page; state.notice = ""; render(); }
       }
     }, [label]);
