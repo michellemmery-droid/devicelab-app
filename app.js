@@ -27,6 +27,7 @@
     mapHall: "",
     mapFocusId: "",
     mapBack: "home",
+    mapView: "list",
     missionBack: "",
     photos: {},
     photoError: "",
@@ -1006,13 +1007,27 @@
     return window.DL_MAP || { halls: {}, pins: [] };
   }
 
-  function focusPin(row) {
-    if (!row) return null;
-    var key = mapKey(row.name);
-    if (key.length < 5) return null;
+  function pinForKey(hall, key) {
+    if (!key || key.length < 5) return null;
     var pins = mapData().pins || [];
     for (var i = 0; i < pins.length; i++) {
-      if (pins[i].hall === row.hall && pins[i].key === key) return pins[i];
+      if (pins[i].hall === hall && pins[i].key === key) return pins[i];
+    }
+    return null;
+  }
+
+  function focusPin(row) {
+    if (!row) return null;
+    var direct = pinForKey(row.hall, mapKey(row.name));
+    if (direct) return direct;
+    if (!row.stand_number) return null;
+    var stand = String(row.stand_number).trim();
+    var mates = state.rows.filter(function (other) {
+      return other.hall === row.hall && String(other.stand_number || "").trim() === stand;
+    });
+    for (var i = 0; i < mates.length; i++) {
+      var found = pinForKey(row.hall, mapKey(mates[i].name));
+      if (found) return found;
     }
     return null;
   }
@@ -1035,8 +1050,10 @@
     if (row) {
       state.mapHall = row.hall || state.mapHall || "1";
       state.mapFocusId = row.id || "";
-    } else if (!state.mapHall) {
-      state.mapHall = (state.here && state.here.hall) || "1";
+      state.mapView = "floor";
+    } else {
+      state.mapView = "list";
+      if (!state.mapHall) state.mapHall = (state.here && state.here.hall) || "1";
     }
     state.page = "map";
     state.error = "";
@@ -1098,8 +1115,9 @@
   function render() {
     parkVoice();
     clear(root);
-    var bare = state.page === "mission" || state.page === "capture" || state.page === "profile";
-    root.className = "phone" + (bare ? " bare" : "") + (state.page === "capture" ? " capture" : "");
+    var floor = state.page === "map" && state.mapView === "floor";
+    var bare = state.page === "mission" || state.page === "capture" || state.page === "profile" || floor;
+    root.className = "phone" + (bare ? " bare" : "") + (state.page === "capture" ? " capture" : "") + (floor ? " mapmode" : "");
     if (!state.session) return renderLogin();
     if (state.busy && !state.rows.length) {
       root.appendChild(el("p", { class: "hint" }, ["Henter dagen…"]));
@@ -1115,7 +1133,7 @@
     else if (state.page === "ready") renderReady();
     else if (state.page === "profile") renderProfile();
     else renderHome();
-    if (state.page === "home" || state.page === "hall" || state.page === "archive" || state.page === "research" || state.page === "after" || state.page === "ready" || state.page === "map") renderNav();
+    if (!floor && (state.page === "home" || state.page === "hall" || state.page === "archive" || state.page === "research" || state.page === "after" || state.page === "ready" || state.page === "map")) renderNav();
   }
 
   function renderLogin() {
@@ -3497,8 +3515,8 @@
 
   function placeCard(row) {
     return el("div", { class: "place" }, [
-      el("p", { class: "status-line" }, [hallLabel(row.hall)]),
-      el("p", { class: "quiet" }, [row.stand_number ? "Stand " + row.stand_number : "Uden standnummer"]),
+      el("p", { class: "status-line" }, ["Hal: " + (row.hall === "Galeria" ? "Galeria" : (row.hall || "–"))]),
+      el("p", { class: "quiet" }, [row.stand_number ? "Stand: " + row.stand_number : "Uden standnummer"]),
       row.hall ? el("button", {
         class: "action",
         type: "button",
@@ -3515,6 +3533,7 @@
       onclick: function () {
         state.mapHall = hall;
         state.mapFocusId = "";
+        state.mapView = "floor";
         state.page = "map";
         render();
       }
@@ -3527,60 +3546,76 @@
     ]);
   }
 
+  var mapCam = { scale: 1, x: 0, y: 0, fit: 1, iw: 1, ih: 1, lastTap: 0 };
+
   function renderMap() {
+    if (state.mapView !== "floor") {
+      root.appendChild(el("h1", null, ["Messekort"]));
+      root.appendChild(el("p", { class: "quiet" }, ["Vælg en hal. Kortet åbner i fuld skærm."]));
+      root.appendChild(el("div", { class: "legend" }, [
+        legendDot("high", "Høj prioritet"),
+        legendDot("medium", "Mellem"),
+        legendDot("low", "Lav prioritet"),
+        legendDot("visited", "Besøgt")
+      ]));
+      mapHallOrder().forEach(function (name) { root.appendChild(hallCountButton(name)); });
+      return;
+    }
     var focus = state.rows.filter(function (row) { return row.id === state.mapFocusId; })[0] || null;
     var hall = (focus && focus.hall) || state.mapHall || "1";
     state.mapHall = hall;
-    var back = state.mapBack === "profile" ? "Tilbage" : (state.mapBack === "mission" ? "Tilbage" : "Luk");
-    root.appendChild(topBar(back, function () {
-      state.page = state.mapBack || "home";
-      render();
-    }, focus ? standLabel(focus) : hallLabel(hall)));
-    if (focus) {
-      root.appendChild(el("h1", null, [focus.stand_number ? "Stand " + focus.stand_number : hallLabel(focus.hall)]));
-      root.appendChild(el("p", { class: "lead" }, [focus.name]));
-      root.appendChild(el("p", { class: "quiet" }, [hallLabel(focus.hall)]));
-    } else {
-      root.appendChild(el("h1", null, ["Messekort"]));
-      root.appendChild(el("p", { class: "quiet" }, ["Vælg en hal og find den næste stand."]));
-    }
+    var target = focusPin(focus);
+    var screen = el("div", { class: "map-screen" });
+    var stage = el("div", { class: "map-stage" });
+    var world = el("div", { class: "map-world" });
     var file = (mapData().halls || {})[hall];
-    var pin = focusPin(focus);
-    var frame = el("div", { class: "map-frame" + (pin ? " zoom" : "") });
-    if (file) {
-      var image = el("img", { alt: hallLabel(hall), src: file });
-      image.addEventListener("load", centerMapPin);
-      frame.appendChild(image);
-      (mapData().pins || []).filter(function (item) { return item.hall === hall; }).forEach(function (item) {
-        var rows = pinRows(item);
-        var marked = pin && item.key === pin.key;
-        frame.appendChild(el("button", {
-          class: "pin " + pinTone(item) + (marked ? " on" : ""),
-          type: "button",
-          title: rows.length ? rows[0].name : item.key,
-          style: "left:" + (item.x * 100) + "%;top:" + (item.y * 100) + "%",
-          onclick: function () {
-            if (!rows.length) return;
-            state.mapFocusId = rows[0].id;
-            state.mapHall = rows[0].hall;
-            render();
-          }
-        }));
-      });
+    var image = file ? el("img", { alt: hallLabel(hall), src: file, draggable: "false" }) : null;
+    if (image) world.appendChild(image);
+    (mapData().pins || []).filter(function (item) { return item.hall === hall; }).forEach(function (item) {
+      var rows = pinRows(item);
+      var marked = target && item.key === target.key && item.x === target.x && item.y === target.y;
+      var shown = marked && focus ? focus : (rows[0] || null);
+      world.appendChild(el("button", {
+        class: "pin " + pinTone(item) + (marked ? " on" : ""),
+        type: "button",
+        style: "left:" + (item.x * 100) + "%;top:" + (item.y * 100) + "%",
+        onclick: function (event) {
+          event.stopPropagation();
+          event.preventDefault();
+          if (!rows.length) return;
+          state.mapFocusId = rows[0].id;
+          state.mapHall = rows[0].hall;
+          state.mapView = "floor";
+          render();
+        }
+      }, [
+        el("i", { class: "pin-dot" }),
+        shown ? el("span", { class: "pin-label" }, [
+          el("b", null, [shown.stand_number || hallLabel(shown.hall)]),
+          el("small", null, [shown.name])
+        ]) : null
+      ]));
+    });
+    stage.appendChild(world);
+    screen.appendChild(stage);
+    screen.appendChild(el("button", {
+      class: "map-back",
+      type: "button",
+      onclick: function () {
+        state.mapView = "list";
+        state.mapFocusId = "";
+        render();
+      }
+    }, ["Tilbage til haller"]));
+    if (focus && !target) {
+      screen.appendChild(el("div", { class: "map-miss" }, [
+        el("b", null, [focus.stand_number ? "Stand " + focus.stand_number : hallLabel(focus.hall)]),
+        el("span", null, [focus.name]),
+        el("span", null, ["Find navnet på kortet."])
+      ]));
     }
-    root.appendChild(el("div", { class: "map-stage" }, [frame]));
-    if (focus && !pin) {
-      root.appendChild(el("p", { class: "quiet" }, ["Standen er ikke prikket endnu. Kig efter nummeret i hallen."]));
-    }
-    root.appendChild(el("div", { class: "legend" }, [
-      legendDot("high", "Høj prioritet"),
-      legendDot("medium", "Mellem"),
-      legendDot("low", "Lav prioritet"),
-      legendDot("visited", "Besøgt")
-    ]));
-    root.appendChild(el("p", { class: "kicker section" }, ["Haller"]));
-    mapHallOrder().forEach(function (name) { root.appendChild(hallCountButton(name)); });
-    requestAnimationFrame(centerMapPin);
+    root.appendChild(screen);
+    if (image) mountFloor(stage, world, image, target);
   }
 
   function legendDot(tone, label) {
@@ -3590,12 +3625,126 @@
     ]);
   }
 
-  function centerMapPin() {
-    var stage = document.querySelector(".map-stage");
-    var pin = document.querySelector(".map-frame .pin.on");
-    if (!stage || !pin) return;
-    stage.scrollLeft = pin.offsetLeft - stage.clientWidth / 2;
-    stage.scrollTop = pin.offsetTop - stage.clientHeight / 2;
+  function applyCam(world) {
+    world.style.transform = "translate(" + mapCam.x + "px," + mapCam.y + "px) scale(" + mapCam.scale + ")";
+    world.style.setProperty("--s", String(mapCam.scale));
+    world.classList.toggle("named", mapCam.scale >= mapCam.fit * 2.2);
+  }
+
+  function clampPan(stage) {
+    var viewW = stage.clientWidth;
+    var viewH = stage.clientHeight;
+    var width = mapCam.iw * mapCam.scale;
+    var height = mapCam.ih * mapCam.scale;
+    var slack = 48;
+    if (width <= viewW) mapCam.x = (viewW - width) / 2;
+    else mapCam.x = Math.min(slack, Math.max(viewW - width - slack, mapCam.x));
+    if (height <= viewH) mapCam.y = (viewH - height) / 2;
+    else mapCam.y = Math.min(slack, Math.max(viewH - height - slack, mapCam.y));
+  }
+
+  function zoomBy(stage, world, clientX, clientY, factor) {
+    var rect = stage.getBoundingClientRect();
+    var px = clientX - rect.left;
+    var py = clientY - rect.top;
+    var next = Math.max(mapCam.fit, Math.min(mapCam.fit * 8, mapCam.scale * factor));
+    var change = next / mapCam.scale;
+    mapCam.x = px - (px - mapCam.x) * change;
+    mapCam.y = py - (py - mapCam.y) * change;
+    mapCam.scale = next;
+    clampPan(stage);
+    applyCam(world);
+  }
+
+  function frameCam(stage, world, frac) {
+    mapCam.fit = Math.min(stage.clientWidth / mapCam.iw, stage.clientHeight / mapCam.ih) || 1;
+    mapCam.scale = frac ? mapCam.fit * 4 : mapCam.fit;
+    var width = mapCam.iw * mapCam.scale;
+    var height = mapCam.ih * mapCam.scale;
+    if (frac) {
+      mapCam.x = stage.clientWidth / 2 - frac.x * width;
+      mapCam.y = stage.clientHeight / 2 - frac.y * height;
+    } else {
+      mapCam.x = (stage.clientWidth - width) / 2;
+      mapCam.y = (stage.clientHeight - height) / 2;
+    }
+    clampPan(stage);
+    applyCam(world);
+  }
+
+  function mountFloor(stage, world, image, target) {
+    function ready() {
+      mapCam.iw = image.naturalWidth || image.width || 1;
+      mapCam.ih = image.naturalHeight || image.height || 1;
+      frameCam(stage, world, target);
+      bindMapGestures(stage, world);
+    }
+    if (image.complete && image.naturalWidth) ready();
+    else image.addEventListener("load", ready);
+  }
+
+  function bindMapGestures(stage, world) {
+    var points = {};
+    var pinch = 0;
+    var moved = false;
+    var downEl = null;
+    function live() {
+      return Object.keys(points).map(function (id) { return points[id]; });
+    }
+    function span(list) {
+      var dx = list[0].x - list[1].x;
+      var dy = list[0].y - list[1].y;
+      return Math.sqrt(dx * dx + dy * dy) || 1;
+    }
+    stage.addEventListener("pointerdown", function (event) {
+      if (event.target.closest && event.target.closest(".map-back")) return;
+      downEl = event.target;
+      points[event.pointerId] = { x: event.clientX, y: event.clientY };
+      try { stage.setPointerCapture(event.pointerId); } catch (err) { /* synthetic events */ }
+      moved = false;
+      var list = live();
+      pinch = list.length >= 2 ? span(list) : 0;
+    });
+    stage.addEventListener("pointermove", function (event) {
+      if (!points[event.pointerId]) return;
+      var prev = points[event.pointerId];
+      points[event.pointerId] = { x: event.clientX, y: event.clientY };
+      var list = live();
+      if (list.length >= 2) {
+        var next = span(list);
+        var midX = (list[0].x + list[1].x) / 2;
+        var midY = (list[0].y + list[1].y) / 2;
+        if (pinch) zoomBy(stage, world, midX, midY, next / pinch);
+        pinch = next;
+        moved = true;
+        return;
+      }
+      var dx = event.clientX - prev.x;
+      var dy = event.clientY - prev.y;
+      if (Math.abs(dx) + Math.abs(dy) > 4) moved = true;
+      mapCam.x += dx;
+      mapCam.y += dy;
+      clampPan(stage);
+      applyCam(world);
+    });
+    stage.addEventListener("pointerup", function (event) {
+      delete points[event.pointerId];
+      if (live().length < 2) pinch = 0;
+      if (moved || live().length) return;
+      if (downEl && downEl.closest && downEl.closest(".pin")) return;
+      var now = Date.now();
+      if (now - mapCam.lastTap < 320 && mapCam.scale < mapCam.fit * 7.5) {
+        zoomBy(stage, world, event.clientX, event.clientY, 2);
+        mapCam.lastTap = 0;
+      } else mapCam.lastTap = now;
+    });
+    stage.addEventListener("pointercancel", function (event) { delete points[event.pointerId]; });
+    stage.addEventListener("wheel", function (event) {
+      event.preventDefault();
+      zoomBy(stage, world, event.clientX, event.clientY, event.deltaY < 0 ? 1.15 : 0.87);
+    }, { passive: false });
+    stage.addEventListener("touchmove", function (event) { event.preventDefault(); }, { passive: false });
+    stage.addEventListener("gesturestart", function (event) { event.preventDefault(); });
   }
 
   function renderNav() {
@@ -3618,6 +3767,7 @@
         else if (page === "after") openAfter();
         else if (page === "map") {
           state.mapFocusId = "";
+          state.mapView = "list";
           state.mapBack = "home";
           if (!state.mapHall) state.mapHall = (state.here && state.here.hall) || "1";
           state.page = "map";

@@ -412,34 +412,123 @@ a { color: var(--ink); }
 .dock .action { margin-top: 0; }
 
 .place { margin-top: 18px; }
+.place .status-line { font-size: 1.7rem; }
+.place .quiet { font-size: 1.25rem; color: var(--ink); }
 .place .action { margin-top: 14px; }
-.map-stage {
-  margin-top: 16px;
-  max-height: 70dvh;
-  overflow: auto;
-  border: 1px solid var(--line);
-  border-radius: 18px;
-  background: #f7f1e7;
-  -webkit-overflow-scrolling: touch;
+.phone.mapmode { width: 100%; padding: 0; height: 100dvh; overflow: hidden; }
+body:has(.map-screen) { overflow: hidden; height: 100dvh; }
+.map-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  background: #efe6d6;
 }
-.map-frame { position: relative; }
-.map-frame.zoom { width: 220%; }
-.map-stage:has(.map-frame.zoom) { height: 68dvh; }
-.map-frame img { display: block; width: 100%; height: auto; }
+.map-stage {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.map-world {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+.map-world img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: none;
+  pointer-events: none;
+}
 .pin {
   position: absolute;
+  width: 48px;
+  height: 48px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  transform: translate(-50%, -50%) scale(calc(1 / var(--s, 1)));
+  transform-origin: center center;
+}
+.pin-dot {
+  display: block;
   width: 16px;
   height: 16px;
-  margin: -8px 0 0 -8px;
-  padding: 0;
+  margin: 16px auto;
   border: 2px solid #fffaf3;
   border-radius: 50%;
+  position: relative;
 }
-.pin.on { width: 26px; height: 26px; margin: -13px 0 0 -13px; z-index: 2; }
-.pin.high { background: #c23b2e; }
-.pin.medium { background: #d7a21a; }
-.pin.low { background: #2f8f4e; }
-.pin.visited { background: #2f6fbe; }
+.pin.high .pin-dot { background: #c23b2e; }
+.pin.medium .pin-dot { background: #d7a21a; }
+.pin.low .pin-dot { background: #2f8f4e; }
+.pin.visited .pin-dot { background: #2f6fbe; }
+.pin.on { z-index: 2; }
+.pin.on .pin-dot {
+  width: 20px;
+  height: 20px;
+  margin: 14px auto;
+  box-shadow: 0 0 0 5px rgba(194, 59, 46, 0.28);
+}
+.pin.on .pin-dot::after {
+  content: "";
+  position: absolute;
+  inset: -8px;
+  border: 3px solid #c23b2e;
+  border-radius: 50%;
+  animation: pinpulse 1.15s ease-out infinite;
+}
+@keyframes pinpulse {
+  0% { transform: scale(0.7); opacity: 0.85; }
+  100% { transform: scale(2.1); opacity: 0; }
+}
+.pin-label {
+  display: none;
+  position: absolute;
+  left: 36px;
+  top: 6px;
+  min-width: 88px;
+  padding: 6px 8px;
+  border-radius: 10px;
+  background: #1c1915;
+  color: #fbf6ee;
+  text-align: left;
+  pointer-events: none;
+}
+.pin-label b { display: block; font-size: 0.95rem; font-weight: 700; }
+.pin-label small { display: block; margin-top: 1px; font-size: 0.78rem; font-weight: 500; }
+.pin.on .pin-label,
+.map-world.named .pin-label { display: block; }
+.map-back {
+  position: absolute;
+  z-index: 3;
+  top: calc(10px + env(safe-area-inset-top));
+  left: 12px;
+  min-height: 44px;
+  padding: 0 16px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(251, 246, 238, 0.94);
+  font-weight: 650;
+}
+.map-miss {
+  position: absolute;
+  z-index: 3;
+  left: 12px;
+  right: 12px;
+  bottom: calc(14px + env(safe-area-inset-bottom));
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: rgba(251, 246, 238, 0.96);
+  border: 1px solid var(--line);
+}
+.map-miss b { display: block; font-size: 1.7rem; letter-spacing: -0.03em; }
+.map-miss span { display: block; margin-top: 2px; color: var(--muted); }
 .legend { display: flex; flex-wrap: wrap; gap: 8px 14px; margin-top: 12px; }
 .legend span { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 0.92rem; }
 .dot { width: 10px; height: 10px; border-radius: 50%; }
