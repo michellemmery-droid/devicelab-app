@@ -52,7 +52,9 @@
     dayFresh: false,
     loadingDay: false,
     messeDetail: false,
-    relationOpen: false
+    relationOpen: false,
+    folds: {},
+    contactDraft: null
   };
   var PHOTO_MAX_SIDE = 3200;
   var PHOTO_JPEG_QUALITY = 0.92;
@@ -1142,7 +1144,7 @@
     state.dayFresh = true;
     try {
       var pack = await Promise.all([
-        call("/rest/v1/contacts?select=id,company_id,name,title,email,phone,created_at&limit=1000"),
+        call("/rest/v1/contacts?select=id,company_id,name,title,email,phone,linkedin,created_at&limit=1000"),
         call("/rest/v1/notes?select=id,company_id,body,created_at&limit=1000"),
         call("/rest/v1/followups?select=id,company_id,title,done,created_at&limit=1000")
       ]);
@@ -1718,14 +1720,14 @@
     return String(key || "").split("/").map(encodeURIComponent).join("/");
   }
 
-  function renderPhotos(exhibitorId) {
+  function renderPhotos(exhibitorId, place) {
     if (!exhibitorId) return;
     ensurePhotos(exhibitorId);
     var camera = el("input", { class: "file", type: "file", accept: "image/*", capture: "environment" });
     var library = el("input", { class: "file", type: "file", accept: "image/*" });
     camera.addEventListener("change", function () { takePhoto(exhibitorId, camera); });
     library.addEventListener("change", function () { takePhoto(exhibitorId, library); });
-    root.appendChild(el("p", { class: "kicker section" }, ["Billeder"]));
+    root.appendChild(el("p", { class: place === "inside" ? "kicker sub" : "kicker section" }, ["Billeder"]));
     root.appendChild(camera);
     root.appendChild(library);
     root.appendChild(el("div", { class: "pair" }, [
@@ -2001,7 +2003,7 @@
     return "Stop · " + clock((Date.now() - recording.started) / 1000);
   }
 
-  function renderVoices(exhibitorId) {
+  function renderVoices(exhibitorId, place) {
     if (!exhibitorId) return;
     ensureVoices(exhibitorId);
     var live = state.recording && state.recording.exhibitorId === exhibitorId;
@@ -2015,7 +2017,7 @@
       }
     }, [live ? stopLabel(state.recording) : "Optag"]);
     if (live) state.recording.label = button;
-    root.appendChild(el("p", { class: "kicker section" }, ["Stemmenoter"]));
+    root.appendChild(el("p", { class: place === "inside" ? "kicker sub" : "kicker section" }, ["Stemmenoter"]));
     root.appendChild(button);
     if (state.voiceBusy) root.appendChild(el("p", { class: "quiet" }, ["Gemmer stemmenoten…"]));
     if (state.voiceError) root.appendChild(el("p", { class: "error" }, [state.voiceError]));
@@ -2720,6 +2722,8 @@
     state.notice = "";
     state.busy = true;
     state.relationOpen = false;
+    state.folds = {};
+    state.contactDraft = null;
     state.profileToken = companyId;
     state.photoError = "";
     state.voiceError = "";
@@ -2745,74 +2749,228 @@
   function renderProfile() {
     var profile = state.profile || {};
     var stand = standFor(profile.id);
-    root.appendChild(topBar("Tilbage", function () { state.page = state.returnTo || "research"; render(); }, stand || "Research"));
+    var exhibitor = exhibitorRow(profile.id);
     var role = businessRole(profile);
-    root.appendChild(el("h1", { class: "voice" }, [profile.name || "Virksomhed"]));
-    var exhibitorSync = exhibitorRow(profile.id);
-    if (exhibitorSync) {
-      var companySync = syncLine(exhibitorSync.id);
+    root.appendChild(topBar("Tilbage", function () { state.page = state.returnTo || "research"; render(); }, stand || "Research"));
+    root.appendChild(el("h1", { class: "voice" }, [profile.name || (exhibitor && exhibitor.name) || "Virksomhed"]));
+    if (exhibitor) {
+      var companySync = syncLine(exhibitor.id);
       if (companySync) root.appendChild(companySync);
     }
     root.appendChild(el("div", { class: "badges" }, [
       role ? el("span", { class: "pill outline" }, [role]) : null,
       el("span", { class: badgeClass(profile.customer_type) }, [typeLabels[profile.customer_type] || "Ikke afklaret"]),
-      el("span", { class: "pill" }, [visitValues[profile.visit_value] || "Besøgsværdi ikke sat"]),
-      el("span", { class: "pill score" }, ["Score " + (profile.match_score || 0)]),
-      profile.profile_confidence === "thin" ? el("span", { class: "pill low" }, ["Tyndt grundlag"]) : null
+      exhibitor ? el("span", { class: "pill outline" }, [mateLabel(exhibitor)]) : null,
+      el("span", { class: "pill score" }, ["Score " + (profile.match_score || 0)])
     ]));
-    var exhibitor = exhibitorRow(profile.id);
-    renderFairMemory(exhibitor);
-    if (exhibitor) renderPhotos(exhibitor.id);
-    if (exhibitor) renderVoices(exhibitor.id);
+    renderRelation(profile);
+    renderProfileContacts(exhibitor);
+    renderLeadStatus(exhibitor);
+    renderVisitPack(exhibitor);
     if (state.busy) {
       root.appendChild(el("p", { class: "hint" }, ["Henter profilen…"]));
-      return;
-    }
-    if (role && profile.biography) {
-      root.appendChild(el("article", { class: "card qcard" }, [
-        el("p", { class: "kicker" }, ["Forretning"]),
-        el("p", { class: "ask serif" }, [profile.biography])
-      ]));
-    }
-    renderRelation(profile);
-    root.appendChild(el("article", { class: "card qcard" }, [
-      el("p", { class: "kicker" }, ["Lead Hypothesis"]),
-      el("p", { class: "ask serif" }, [profile.lead_hypothesis || "Der er ikke skrevet en hypotese endnu."])
-    ]));
-    var asks = asList(profile.qualification_questions);
-    if (asks.length) {
-      root.appendChild(el("article", { class: "card qcard" }, [
-        el("p", { class: "kicker" }, ["Kvalificerende spørgsmål"])
-      ].concat(asks.map(function (item) { return el("p", { class: "ask" }, [item]); }))));
-    }
-    chipBlock("Smertepunkter", profile.pain_points);
-    chipBlock("Samtaleemner", profile.conversation_topics);
-    var reasons = asList(profile.match_reason);
-    if (reasons.length) {
-      root.appendChild(el("section", { class: "hour" }, [
-        el("p", { class: "kicker" }, ["Hvorfor scoren"]),
-        el("p", { class: "quiet" }, [reasons.join(" · ")])
-      ]));
-    }
-    if (!role && profile.biography) root.appendChild(el("p", { class: "quiet" }, [profile.biography]));
-    if (!role && profile.about) root.appendChild(el("p", { class: "quiet" }, [profile.about]));
-    var site = (profile.website || "").trim();
-    if (site) {
-      var href = site.indexOf("http") === 0 ? site : "https://" + site;
-      root.appendChild(el("p", { class: "quiet" }, [el("a", { href: href, target: "_blank", rel: "noopener" }, [site])]));
+    } else {
+      renderProfileBackground(profile, role);
+      if (exhibitor && exhibitor.suggestion_reason) {
+        foldCard("reason", "Forslagets grund", [el("p", { class: "quiet" }, [exhibitor.suggestion_reason])]);
+      }
     }
     if (state.notice) root.appendChild(el("p", { class: "quiet" }, [state.notice]));
     if (state.error) root.appendChild(el("p", { class: "error" }, [state.error]));
   }
 
-  function renderRelation(profile) {
-    var current = profile.relationship_status || "new";
-    if (!state.relationOpen) {
+  function renderLeadStatus(exhibitor) {
+    var status = exhibitor && outcomes[exhibitor.relevance];
+    var level = exhibitor && levels[exhibitor.sales_opportunity];
+    var next = exhibitor && (exhibitor.next_step || "").trim();
+    root.appendChild(el("p", { class: "kicker section" }, ["Lead"]));
+    root.appendChild(el("p", { class: "status-line" }, [status || "Ingen status endnu"]));
+    if (level) root.appendChild(el("p", { class: "quiet" }, [level]));
+    root.appendChild(el("p", { class: "next-step" }, [
+      "Næste handling",
+      el("b", null, [next || "Ingen"])
+    ]));
+    if (exhibitor && suggestions[exhibitor.suggestion]) {
+      root.appendChild(el("p", { class: "quiet" }, ["Forslag: " + suggestions[exhibitor.suggestion]]));
+    }
+  }
+
+  function renderVisitPack(exhibitor) {
+    root.appendChild(el("p", { class: "kicker section" }, ["Messebesøg"]));
+    var note = visibleNote(exhibitor);
+    root.appendChild(el("p", { class: "kicker sub" }, ["Noter"]));
+    root.appendChild(el("p", { class: note ? "ask" : "quiet" }, [note || "Ingen noter endnu."]));
+    if (exhibitor && exhibitor.fair_summary) {
+      root.appendChild(el("p", { class: "kicker sub" }, ["Samtalen"]));
+      root.appendChild(el("p", { class: "ask" }, [exhibitor.fair_summary]));
+    }
+    if (!exhibitor) {
+      root.appendChild(el("p", { class: "quiet" }, ["Billeder og stemmenoter hører til besøget."]));
+      return;
+    }
+    renderPhotos(exhibitor.id, "inside");
+    renderVoices(exhibitor.id, "inside");
+  }
+
+  function renderProfileContacts(exhibitor) {
+    root.appendChild(el("p", { class: "kicker section" }, ["Kontaktpersoner"]));
+    var people = exhibitor ? knownContacts(exhibitor.id) : [];
+    if (!people.length) root.appendChild(el("p", { class: "quiet" }, ["Ingen kontaktperson endnu."]));
+    people.forEach(function (contact) { root.appendChild(contactCard(contact)); });
+    if (!exhibitor) return;
+    if (!state.contactDraft) {
       root.appendChild(el("button", {
         class: "choice slim",
         type: "button",
+        onclick: function () {
+          state.contactDraft = { name: "", title: "", email: "", phone: "", linkedin: "", saving: false, error: "" };
+          render();
+        }
+      }, ["+ Tilføj kontaktperson"]));
+      return;
+    }
+    root.appendChild(draftField("name", "Navn", "text"));
+    root.appendChild(draftField("title", "Titel", "text"));
+    root.appendChild(draftField("email", "Email", "email"));
+    root.appendChild(draftField("phone", "Telefon", "tel"));
+    root.appendChild(draftField("linkedin", "LinkedIn", "text"));
+    if (state.contactDraft.error) root.appendChild(el("p", { class: "error" }, [state.contactDraft.error]));
+    root.appendChild(el("div", { class: "pair" }, [
+      el("button", {
+        class: "choice",
+        type: "button",
+        disabled: state.contactDraft.saving ? "" : null,
+        onclick: function () { saveProfileContact(exhibitor.id); }
+      }, [state.contactDraft.saving ? "Gemmer…" : "Gem kontakt"]),
+      el("button", {
+        class: "choice",
+        type: "button",
+        onclick: function () { state.contactDraft = null; render(); }
+      }, ["Annuller"])
+    ]));
+  }
+
+  function contactCard(contact) {
+    var lines = [];
+    if ((contact.email || "").trim()) lines.push(el("a", { href: "mailto:" + contact.email.trim() }, [contact.email.trim()]));
+    if ((contact.phone || "").trim()) lines.push(el("a", { href: "tel:" + contact.phone.replace(/\s/g, "") }, [contact.phone.trim()]));
+    var linkedin = (contact.linkedin || "").trim();
+    if (linkedin) {
+      var href = linkedin.indexOf("http") === 0 ? linkedin : (linkedin.indexOf("linkedin.com") >= 0 ? "https://" + linkedin : "");
+      lines.push(href ? el("a", { href: href, target: "_blank", rel: "noopener" }, ["LinkedIn"]) : el("span", null, [linkedin]));
+    }
+    if (!contact.name && !contact.title && !lines.length) return null;
+    return el("article", { class: "card person" }, [
+      contact.name ? el("p", { class: "person-name" }, [contact.name]) : null,
+      contact.title ? el("p", { class: "meta" }, [contact.title]) : null
+    ].concat(lines.map(function (line) { return el("p", { class: "quiet" }, [line]); })));
+  }
+
+  function draftField(key, placeholder, type) {
+    var input = el("input", { class: "field", type: type, placeholder: placeholder, value: state.contactDraft[key] || "", autocomplete: "off" });
+    input.addEventListener("input", function () { state.contactDraft[key] = input.value; });
+    return input;
+  }
+
+  async function saveProfileContact(exhibitorId) {
+    var draft = state.contactDraft;
+    if (!draft || draft.saving) return;
+    var name = (draft.name || "").trim();
+    if (!name) {
+      draft.error = "Skriv et navn.";
+      render();
+      return;
+    }
+    draft.saving = true;
+    draft.error = "";
+    render();
+    var when = new Date().toISOString();
+    var op = textOp(exhibitorId, "contact", {
+      id: "",
+      company_id: exhibitorId,
+      name: name,
+      title: (draft.title || "").trim(),
+      email: (draft.email || "").trim(),
+      phone: (draft.phone || "").trim(),
+      linkedin: (draft.linkedin || "").trim(),
+      source: "fair",
+      created_at: when
+    }, when);
+    try {
+      await rememberAll([op]);
+      state.contacts = [op.body].concat(state.contacts || []);
+      state.contactDraft = null;
+      flush();
+      saveFair();
+      render();
+    } catch (err) {
+      if (state.contactDraft) {
+        state.contactDraft.saving = false;
+        state.contactDraft.error = "Kontakten kunne ikke gemmes.";
+      }
+      render();
+    }
+  }
+
+  function renderProfileBackground(profile, role) {
+    var business = [];
+    if (profile.biography) business.push(el("p", { class: "ask serif" }, [profile.biography]));
+    if (!role && profile.about) business.push(el("p", { class: "quiet" }, [profile.about]));
+    if (visitValues[profile.visit_value]) business.push(el("p", { class: "quiet" }, [visitValues[profile.visit_value]]));
+    if (profile.profile_confidence === "thin") business.push(el("p", { class: "quiet" }, ["Tyndt grundlag"]));
+    var site = (profile.website || "").trim();
+    if (site) {
+      var href = site.indexOf("http") === 0 ? site : "https://" + site;
+      business.push(el("p", { class: "quiet" }, [el("a", { href: href, target: "_blank", rel: "noopener" }, [site])]));
+    }
+    foldCard("business", "Forretning", business);
+    foldCard("hypothesis", "Lead Hypothesis", [
+      el("p", { class: "ask serif" }, [profile.lead_hypothesis || "Der er ikke skrevet en hypotese endnu."])
+    ]);
+    var asks = asList(profile.qualification_questions);
+    if (asks.length) {
+      foldCard("questions", "Kvalificerende spørgsmål", asks.map(function (item) {
+        return el("p", { class: "ask" }, [item]);
+      }));
+    }
+    var pains = asList(profile.pain_points);
+    if (pains.length) foldCard("pains", "Smertepunkter", [chipLine(pains)]);
+    var topics = asList(profile.conversation_topics);
+    if (topics.length) foldCard("topics", "Samtaleemner", [chipLine(topics)]);
+    var reasons = asList(profile.match_reason);
+    if (reasons.length) foldCard("score", "Hvorfor scoren", [el("p", { class: "quiet" }, [reasons.join(" · ")])]);
+  }
+
+  function chipLine(items) {
+    return el("div", { class: "badges" }, items.map(function (item) {
+      return el("span", { class: "pill outline" }, [item]);
+    }));
+  }
+
+  function foldCard(id, title, nodes) {
+    if (!nodes || !nodes.length) return;
+    var open = !!state.folds[id];
+    root.appendChild(el("article", { class: "card fold" }, [
+      el("button", {
+        class: "fold-toggle",
+        type: "button",
+        onclick: function () {
+          state.folds[id] = !open;
+          render();
+        }
+      }, [(open ? "▼ " : "▶ ") + title]),
+      open ? el("div", { class: "fold-body" }, nodes) : null
+    ]));
+  }
+
+  function renderRelation(profile) {
+    var current = relationCode(profile);
+    if (!state.relationOpen) {
+      root.appendChild(el("button", {
+        class: "relation-line",
+        type: "button",
         onclick: function () { state.relationOpen = true; render(); }
-      }, ["Relation · " + (relations[current] || "Ny virksomhed")]));
+      }, ["Relation: " + (relations[current] || "Ny virksomhed")]));
       return;
     }
     root.appendChild(el("p", { class: "kicker section" }, ["Relation"]));
@@ -2828,15 +2986,10 @@
     })));
   }
 
-  function chipBlock(title, value) {
-    var items = asList(value);
-    if (!items.length) return;
-    root.appendChild(el("section", { class: "hour" }, [
-      el("p", { class: "kicker" }, [title]),
-      el("div", { class: "badges" }, items.map(function (item) {
-        return el("span", { class: "pill outline" }, [item]);
-      }))
-    ]));
+  function relationCode(profile) {
+    if (profile && profile.relationship_status) return profile.relationship_status;
+    var row = profile && exhibitorRow(profile.id);
+    return (row && row.relationship_status) || "new";
   }
 
   function standFor(companyId) {
@@ -2847,12 +3000,12 @@
   }
 
   async function saveRelation(profile, status) {
-    if (!profile || !profile.id || profile.relationship_status === status) {
+    if (!profile || !profile.id || relationCode(profile) === status) {
       state.relationOpen = false;
       render();
       return;
     }
-    var previous = profile.relationship_status || "new";
+    var previous = relationCode(profile);
     profile.relationship_status = status;
     applyRelation(profile.id, status);
     state.error = "";
@@ -2907,46 +3060,6 @@
     } catch (err) {
       state.error = "Genkørslen kunne ikke startes.";
       render();
-    }
-  }
-
-  function renderFairMemory(exhibitor) {
-    if (!exhibitor) return;
-    var outcome = outcomes[exhibitor.relevance] || "";
-    var suggestion = suggestions[exhibitor.suggestion] || "";
-    var level = levels[exhibitor.sales_opportunity] || "";
-    var note = visibleNote(exhibitor);
-    if (note) {
-      root.appendChild(el("article", { class: "card qcard" }, [
-        el("p", { class: "kicker" }, ["Mine noter"]),
-        el("p", { class: "ask" }, [note])
-      ]));
-    }
-    if (outcome || suggestion || level || exhibitor.next_step) {
-      root.appendChild(el("div", { class: "badges" }, [
-        outcome ? el("span", { class: "pill" }, [outcome]) : null,
-        level ? el("span", { class: "pill" }, [level]) : null,
-        exhibitor.next_step ? el("span", { class: "pill outline" }, [exhibitor.next_step]) : null,
-        suggestion ? el("span", { class: "pill outline" }, ["Forslag: " + suggestion]) : null
-      ]));
-      if (exhibitor.suggestion_reason) root.appendChild(el("p", { class: "quiet" }, [exhibitor.suggestion_reason]));
-    }
-    knownContacts(exhibitor.id).forEach(function (contact) {
-      var lines = [];
-      if (contact.title) lines.push(contact.title);
-      if (contact.email) lines.push(contact.email);
-      if (contact.phone) lines.push(contact.phone);
-      if (!contact.name && !lines.length) return;
-      var kids = [el("p", { class: "kicker" }, ["Kontaktperson"])];
-      if (contact.name) kids.push(el("p", { class: "ask" }, [contact.name]));
-      lines.forEach(function (line) { kids.push(el("p", { class: "quiet" }, [line])); });
-      root.appendChild(el("article", { class: "card qcard" }, kids));
-    });
-    if (exhibitor.fair_summary) {
-      root.appendChild(el("article", { class: "card qcard" }, [
-        el("p", { class: "kicker" }, ["Samtalen"]),
-        el("p", { class: "ask serif" }, [exhibitor.fair_summary])
-      ]));
     }
   }
 
