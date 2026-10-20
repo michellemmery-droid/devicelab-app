@@ -228,6 +228,8 @@ h2 { font-size: 2rem; line-height: 1.05; }
   align-items: center;
   gap: 12px;
 }
+.top .link { flex: none; text-align: left; }
+.top .eyebrow { margin-left: auto; text-align: right; }
 .link {
   border: 0;
   background: transparent;

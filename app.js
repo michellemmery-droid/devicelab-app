@@ -1372,16 +1372,20 @@
     render();
   }
 
+  function topBar(label, onclick, place) {
+    return el("div", { class: "top" }, [
+      el("button", { class: "link", type: "button", onclick: onclick }, [label]),
+      place ? el("p", { class: "eyebrow" }, [place]) : null
+    ]);
+  }
+
   function renderHall() {
     var hall = state.hall;
     var stats = hallStats(hall);
     var missing = missingIn(hall);
     var named = missing.filter(hasStand);
     var unnamed = missing.filter(function (row) { return !hasStand(row); });
-    root.appendChild(el("div", { class: "top" }, [
-      el("p", { class: "eyebrow" }, [stats.stands + " stande"]),
-      el("button", { class: "link", type: "button", onclick: function () { state.page = "home"; render(); } }, ["Tilbage"])
-    ]));
+    root.appendChild(topBar("Tilbage", function () { state.page = "home"; render(); }, stats.stands + " stande"));
     root.appendChild(el("h1", null, [hallLabel(hall)]));
     if (state.savedName) {
       root.appendChild(el("p", { class: "done" }, [state.savedName + " er gemt."]));
@@ -1483,10 +1487,7 @@
       renderNav();
       return;
     }
-    root.appendChild(el("div", { class: "top" }, [
-      el("p", { class: "eyebrow" }, [standLabel(row)]),
-      el("button", { class: "link", type: "button", onclick: closeMission }, [state.missionBack === "hall" ? "Tilbage" : "Luk"])
-    ]));
+    root.appendChild(topBar(state.missionBack === "hall" ? "Tilbage" : "Luk", closeMission, standLabel(row)));
     root.appendChild(el("h1", null, [row.name]));
     root.appendChild(syncLine(""));
     if (state.savedName) root.appendChild(el("p", { class: "done" }, [state.savedName + " er gemt."]));
@@ -1612,10 +1613,7 @@
   function renderCapture() {
     var row = state.captureFor;
     var form = state.form;
-    root.appendChild(el("div", { class: "top" }, [
-      el("p", { class: "eyebrow" }, [standLabel(row)]),
-      el("button", { class: "link", type: "button", onclick: function () { state.page = "mission"; render(); } }, ["Tilbage"])
-    ]));
+    root.appendChild(topBar("Tilbage", function () { state.page = "mission"; render(); }, standLabel(row)));
     root.appendChild(el("h1", null, [row.name]));
     var waiting = syncLine(row.id);
     if (waiting) root.appendChild(waiting);
@@ -2747,10 +2745,7 @@
   function renderProfile() {
     var profile = state.profile || {};
     var stand = standFor(profile.id);
-    root.appendChild(el("div", { class: "top" }, [
-      el("p", { class: "eyebrow" }, [stand || "Research"]),
-      el("button", { class: "link", type: "button", onclick: function () { state.page = state.returnTo || "research"; render(); } }, ["Tilbage"])
-    ]));
+    root.appendChild(topBar("Tilbage", function () { state.page = state.returnTo || "research"; render(); }, stand || "Research"));
     var role = businessRole(profile);
     root.appendChild(el("h1", { class: "voice" }, [profile.name || "Virksomhed"]));
     var exhibitorSync = exhibitorRow(profile.id);
