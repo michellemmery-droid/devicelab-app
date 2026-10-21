@@ -570,6 +570,27 @@ body:has(.map-screen) { overflow: hidden; height: 100dvh; }
   background: #fbf6ee;
   border: 1px solid var(--line);
 }
+.map-stand {
+  flex: 0 0 auto;
+  max-height: 28vh;
+  overflow: auto;
+  margin: 0 12px 8px;
+  padding: 10px 14px 12px;
+  border-radius: 18px;
+  background: #fbf6ee;
+  border: 1px solid var(--line);
+}
+.map-stand b { display: block; font-size: 1.15rem; letter-spacing: -0.03em; }
+.map-stand button {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 8px 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  font-weight: 650;
+}
 .map-miss b { display: block; font-size: 1.7rem; letter-spacing: -0.03em; }
 .map-miss span { display: block; margin-top: 2px; color: var(--muted); }
 .legend { display: flex; flex-wrap: wrap; gap: 8px 14px; margin-top: 12px; }

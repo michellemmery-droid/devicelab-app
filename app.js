@@ -1037,34 +1037,24 @@
     return window.DL_MAP || { halls: {}, pins: [] };
   }
 
-  function pinForKey(hall, key) {
-    if (!key || key.length < 5) return null;
-    var pins = mapData().pins || [];
-    for (var i = 0; i < pins.length; i++) {
-      if (pins[i].hall === hall && pins[i].key === key) return pins[i];
-    }
-    return null;
-  }
-
   function focusPin(row) {
     if (!row) return null;
-    var direct = pinForKey(row.hall, mapKey(row.name));
-    if (direct) return direct;
-    if (!row.stand_number) return null;
-    var stand = String(row.stand_number).trim();
-    var mates = state.rows.filter(function (other) {
-      return other.hall === row.hall && String(other.stand_number || "").trim() === stand;
-    });
-    for (var i = 0; i < mates.length; i++) {
-      var found = pinForKey(row.hall, mapKey(mates[i].name));
-      if (found) return found;
+    var pins = mapData().pins || [];
+    var stand = String(row.stand_number || "").trim();
+    for (var i = 0; i < pins.length; i++) {
+      var pin = pins[i];
+      if (pin.hall !== row.hall) continue;
+      if (pin.id && pin.id === row.id) return pin;
+      if (stand && pin.stand === stand) return pin;
     }
     return null;
   }
 
   function pinRows(pin) {
     return state.rows.filter(function (row) {
-      return row.hall === pin.hall && mapKey(row.name) === pin.key;
+      if (row.hall !== pin.hall) return false;
+      if (pin.id) return row.id === pin.id;
+      return String(row.stand_number || "").trim() === pin.stand;
     });
   }
 
@@ -3603,8 +3593,9 @@
     if (image) world.appendChild(image);
     (mapData().pins || []).filter(function (item) { return item.hall === hall; }).forEach(function (item) {
       var rows = pinRows(item);
-      var marked = target && item.key === target.key && item.x === target.x && item.y === target.y;
-      var shown = marked && focus ? focus : (rows[0] || null);
+      if (!rows.length) return;
+      var marked = target && item.x === target.x && item.y === target.y && item.stand === target.stand && item.id === target.id;
+      var labelName = rows.length > 1 ? rows.length + " virksomheder" : rows[0].name;
       world.appendChild(el("button", {
         class: "pin " + pinTone(item) + (marked ? " on" : ""),
         type: "button",
@@ -3612,18 +3603,18 @@
         onclick: function (event) {
           event.stopPropagation();
           event.preventDefault();
-          if (!rows.length) return;
-          state.mapFocusId = rows[0].id;
-          state.mapHall = rows[0].hall;
+          var chosen = focus && rows.some(function (row) { return row.id === focus.id; }) ? focus : rows[0];
+          state.mapFocusId = chosen.id;
+          state.mapHall = chosen.hall;
           state.mapView = "floor";
           render();
         }
       }, [
         el("i", { class: "pin-dot" }),
-        shown ? el("span", { class: "pin-label" }, [
-          el("b", null, [shown.stand_number || hallLabel(shown.hall)]),
-          el("small", null, [shown.name])
-        ]) : null
+        el("span", { class: "pin-label" }, [
+          el("b", null, [item.stand || rows[0].stand_number || hallLabel(rows[0].hall)]),
+          el("small", null, [labelName])
+        ])
       ]));
     });
     stage.appendChild(world);
@@ -3643,11 +3634,13 @@
       ])
     ]));
     screen.appendChild(stage);
-    if (focus && !target) {
+    if (target) {
+      screen.appendChild(standSheet(pinRows(target), focus));
+    } else if (focus) {
       screen.appendChild(el("div", { class: "map-miss" }, [
         el("b", null, [focus.stand_number ? "Stand " + focus.stand_number : hallLabel(focus.hall)]),
         el("span", null, [focus.name]),
-        el("span", null, ["Find navnet på kortet."])
+        el("span", null, ["Standen står ikke på kortet."])
       ]));
     }
     screen.appendChild(el("div", {
@@ -3660,6 +3653,23 @@
     ]));
     root.appendChild(screen);
     if (image) mountFloor(stage, world, image, target);
+  }
+
+  function standSheet(rows, focus) {
+    var ordered = rows.slice().sort(function (a, b) {
+      if (focus && a.id === focus.id) return -1;
+      if (focus && b.id === focus.id) return 1;
+      return a.name.localeCompare(b.name, "da");
+    });
+    var stand = ordered[0] && ordered[0].stand_number;
+    return el("div", { class: "map-stand" }, [
+      el("b", null, [stand ? "Stand " + stand : "Virksomheder"])
+    ].concat(ordered.map(function (row) {
+      return el("button", {
+        type: "button",
+        onclick: function () { openProfile(row.company_id || row.id, "map"); }
+      }, [row.name]);
+    })));
   }
 
   function mapWorldClass() {
